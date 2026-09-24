@@ -1,0 +1,59 @@
+name: Build PDFs
+
+# Compiles both editions of the white paper. On a version tag (v1.0, v1.1, ...)
+# it also publishes a GitHub Release with the two PDFs attached.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "paper/**"
+      - "Makefile"
+      - ".github/workflows/build.yml"
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "paper/**"
+      - "Makefile"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install XeLaTeX, LaTeX packages and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            make \
+            texlive-xetex texlive-latex-base texlive-latex-recommended \
+            texlive-latex-extra texlive-pictures \
+            texlive-lang-chinese texlive-lang-cjk \
+            fonts-crosextra-caladea fonts-crosextra-carlito \
+            fonts-dejavu-mono fonts-lmodern fonts-texgyre \
+            fonts-noto-cjk fonts-noto-cjk-extra
+          fc-cache -f
+
+      - name: Build both editions
+        run: make
+
+      - name: Upload PDFs as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: white-paper-pdf
+          path: build/*.pdf
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "White paper ${{ github.ref_name }}"
+          body: |
+            Enterprise Agent Hosting Platform: A Reference Architecture, ${{ github.ref_name }}.
+            English and Simplified Chinese editions are attached. See CHANGELOG.md for what changed.
+          files: build/*.pdf
