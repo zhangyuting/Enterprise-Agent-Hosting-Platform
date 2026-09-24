@@ -149,7 +149,7 @@ make release    # 构建后把 PDF 复制到 pdf/
   howpublished = {Technical white paper, version 1.0},
   year         = {2026},
   month        = sep,
-  url          = {https://github.com/YOUR_GITHUB_USERNAME/enterprise-agent-hosting-platform}
+  url          = {https://github.com/zhangyuting/Enterprise-Agent-Hosting-Platform}
 }
 ```
 

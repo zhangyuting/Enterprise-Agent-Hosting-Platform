@@ -12,8 +12,8 @@ authors:
 version: "1.0"
 date-released: "2026-09-24"
 license: CC-BY-4.0
-repository-code: "https://github.com/YOUR_GITHUB_USERNAME/enterprise-agent-hosting-platform"
-url: "https://github.com/YOUR_GITHUB_USERNAME/enterprise-agent-hosting-platform"
+repository-code: "https://github.com/zhangyuting/Enterprise-Agent-Hosting-Platform"
+url: "https://github.com/zhangyuting/Enterprise-Agent-Hosting-Platform"
 keywords:
   - AI agents
   - agent platform
@@ -33,4 +33,4 @@ preferred-citation:
   year: 2026
   month: 9
   notes: "Technical white paper, version 1.0. English and Simplified Chinese editions."
-  url: "https://github.com/YOUR_GITHUB_USERNAME/enterprise-agent-hosting-platform"
+  url: "https://github.com/zhangyuting/Enterprise-Agent-Hosting-Platform"
