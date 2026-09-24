@@ -1,0 +1,245 @@
+% =============================================================================
+\whitepaperpart{IV}{产品化、交付与演进}
+{把架构变成可复用的产品：企业系统怎么对接、内核与策略包怎么分、第一阶段交付什么、按什么验收、下一步是什么。}
+
+% =============================================================================
+\section{企业系统对接与通用化}
+\label{sec:integration}
+
+\subsection{复用企业已有系统}
+
+平台不是孤岛。企业通常已经有身份提供方、模型网关、工具网关、持续集成流水线、财务系统和事件总线，这些都按“复用、对接”的方式接入，不重建（表~\ref{tab:integration}）。对于还没有模型网关或工具网关的企业，平台提供默认实现（开源的大模型网关加内置的工具网关）。图~\ref{fig:zoom-ent} 是全景图里企业内部系统那一层，每个系统标出了它对接到平台的哪个模块。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm]
+\node[reuse,zoom] (e1) {\zc{身份提供方}{登录、用户委托验签、服务身份 → 身份与访问管理、控制台}};
+\node[reuse,zoom,right=of e1] (e2) {\zc{模型网关}{已建；增加黑名单与数据分级 → 公共服务层}};
+\node[reuse,zoom,right=of e2] (e3) {\zc{工具网关}{已建；增加分流、幂等、风险字典 → 公共服务层}};
+\node[reuse,zoom,right=of e3] (e4) {\zc{CI 与依赖扫描}{代码型镜像构建时复用 → 注册与发布}};
+\node[reuse,zoom,below=of e1] (e5) {\zc{财务分摊系统}{接收内部分摊账 → 计量与对账}};
+\node[reuse,zoom,right=of e5] (e6) {\zc{风控审批台}{接收单据、回传决议 → 中断与恢复}};
+\node[reuse,zoom,right=of e6] (e7) {\zc{企业事件总线}{业务事件创建执行 → 事件触发}};
+\node[reuse,zoom,right=of e7] (e8) {\zc{企业对象存储}{可替代租用的对象存储 → 文件与产物}};
+\begin{scope}[on background layer]\node[band,draw=Green!60!white,fit=(e1)(e8)] {};\end{scope}
+\end{tikzpicture}
+\caption[企业内部系统的对接点]{企业内部系统及其对接的平台模块（全景图中的企业内部系统区域）}
+\label{fig:zoom-ent}
+\end{figure}
+
+
+\begin{table}[htbp]
+\centering
+\caption{企业内部系统的对接方式}
+\label{tab:integration}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.8cm}L{3.4cm}Y C{1.4cm}@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{企业系统} & \textbf{对接的平台模块} & \textbf{方式} & \textbf{阶段}\\
+  \midrule
+  身份提供方 & 身份与访问管理、控制台、命令行 & 人与 CI 的登录、用户委托验签、服务身份 & 第一\\
+  模型网关 & 公共服务层 & 增加 Agent 黑名单和数据分级映射 & 第一\\
+  工具网关 & 公共服务层 & 增加四类分流、幂等台账和风险字典 & 第一\\
+  CI 与依赖扫描 & 注册与发布 & 代码型镜像构建时复用 & 第一\\
+  财务分摊系统 & 计量与对账 & 导出分摊账；自动入账后续 & 第一／第二\\
+  风控审批台 & 中断与恢复 & 推送单据，决议回传后恢复执行 & 第二\\
+  企业事件总线 & 事件触发 & 业务事件创建执行 & 第二\\
+  企业对象存储 & 文件与产物 & 可替代租用的对象存储 & 可选\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{内核、适配包与策略包}
+
+要让同一套架构在不同企业、不同行业复用，必须先说清哪些部分不变、哪些部分按企业替换。本方案把平台分成三层（表~\ref{tab:kernel}）。
+
+\begin{table}[htbp]
+\centering
+\caption{内核、适配包与策略包}
+\label{tab:kernel}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.2cm}L{6.6cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{层次} & \textbf{内容} & \textbf{变化频率}\\
+  \midrule
+  通用内核 & 三层接口、五条行动通道、四维度能力声明、任务引擎与熔断、统一账本与哈希链、身份核心、五个基本操作的适配层、三本账、三道停机闸门 & 跨企业不变，严格版本化\\
+  适配包 & 身份提供方绑定、模型网关与工具网关的对接、云适配器、观测后端 & 随企业已有系统和供应商替换\\
+  策略包 & 风险字典、审批规则、数据分级、硬性禁止项、留存与删除策略 & 随行业、地区与企业的风险偏好变化\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+内核不包含任何行业业务逻辑，这是通用化的关键。一个新企业落地只需要四步：绑定身份提供方并选择云适配器；对接已有的网关，或者使用默认实现；填写形态预设和风险字典；跑一遍十条不变量的验收和符合性测试。内核代码不需要改动。
+
+\subsection{一个虚构的策略包示例}
+
+下面的例子用来说明行业约束如何进入策略包而不污染内核；它不对应任何真实组织。某医疗服务机构允许 Agent 处理预约协调、材料预审和保险信息核对。策略包规定：受保护的健康信息只能进入指定的模型域；对外发送病历摘要必须经过人工确认；修改诊疗结论、签署处方、扩大自身权限和跨租户访问属于硬性禁止项；高风险流程只允许流程型或经专项审查的代码型 Agent 承载，并要求每步检查点、冷中断和完整审计链。
+
+\begin{notebox}
+  \textbf{示例边界：}本节是虚构的策略包，不构成医疗、隐私或合规建议。正式实施必须由所在地区的法务、
+  安全和业务责任人重新定义数据分级、审批条件和禁止项。
+\end{notebox}
+
+% =============================================================================
+\section{第一阶段交付、演进路线与验收}
+\label{sec:mvp}
+
+\subsection{第一天必须做对的三件事}
+
+有三件事一旦做错，事后修改的代价是重写全部已上线的 Agent，所以必须在第一天做对：
+
+\begin{enumerate}
+  \item \textbf{契约冻结。}六种事件的格式，连同中断事件和恢复字段，一次定义清楚。
+  \item \textbf{权威状态自持。}事件、检查点、注册表和会话映射从第一天起就落在企业自己的数据库里。
+  \item \textbf{双网关在链。}模型调用和工具调用从第一天起就没有绕开网关的路径。
+\end{enumerate}
+
+\subsection{分阶段范围}
+
+演进顺序是“先冻结不可返工的契约，再扩大治理能力，最后开放更高的自治”（图~\ref{fig:roadmap}、表~\ref{tab:phases}）。阶段之间的边界不是功能多少，而是风险边界逐级放开的门槛。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.94\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  stage/.style={rounded corners=4pt,minimum width=4.2cm,minimum height=2.0cm,
+                text width=3.75cm,align=left,line width=.85pt,inner sep=3mm},
+  flow/.style={-{Stealth[length=2.2mm]},line width=1pt,color=Muted},
+  flabel/.style={font=\sffamily\scriptsize,fill=white,inner sep=1.5pt,text=Muted}
+]
+  \node[stage,draw=Primary,fill=PrimaryLight] (mvp)
+    {\textbf{\color{PrimaryDark}第一阶段 · 治理闭环}\\问答型+代码型 · 单云 · 双网关\\熔断 · 幂等 · 委托验签 · 账本};
+  \node[stage,draw=Green,fill=GreenLight,right=14mm of mvp] (p2)
+    {\textbf{\color{GreenDark}第二阶段 · 确定流程与韧性}\\流程型 · 中断恢复 · 审批\\记忆 · 事件触发 · 多云};
+  \node[stage,draw=Rust,fill=RustLight,right=14mm of p2] (p3)
+    {\textbf{\color{RustDark}第三阶段 · 受控的高自治}\\自主型 · 探索到编译\\画布 · 沙箱接口 · Agent 互操作};
+  \draw[flow] (mvp) -- node[flabel,above]{闭环稳定后} (p2);
+  \draw[flow] (p2) -- node[flabel,above]{策略与隔离成熟后} (p3);
+\end{tikzpicture}%
+}
+\caption[三个阶段的演进路径]{从治理闭环到受控高自治的演进路径}
+\label{fig:roadmap}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{三个阶段的范围}
+\label{tab:phases}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.8cm}L{6.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{阶段} & \textbf{核心能力} & \textbf{产品边界}\\
+  \midrule
+  第一阶段 & 问答型与代码型、单云、定时触发、简版控制台、熔断、两类幂等、两类令牌隔离、用户委托验签、三道停机闸门、哈希链、日志归口、输出片段流表 & 建立从开发到安全追责的完整闭环\\
+  第二阶段 & 流程型、中断执行机制、审批工作台、配额管理、长期记忆、事件触发、多云调度、自建观测面板、高级控制台 & 增强确定性流程与运行韧性\\
+  第三阶段 & 自主型、探索到编译的管线、流程画布、沙箱接口产品化、Agent 互操作 & 开放更强的自治，同时保持治理边界\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{六个验收闭环}
+
+第一阶段怎么算建成？不是“组件都部署了”，而是六条端到端的路径都能从入口跑到最终证据（表~\ref{tab:loops}）。组件清单用于建设，闭环用于验收。
+
+\begin{table}[htbp]
+\centering
+\caption{第一阶段的六个验收闭环}
+\label{tab:loops}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}C{0.8cm}L{2.6cm}Y@{}}
+  \toprule
+  \rowcolor{GreenLight}
+  \textbf{\#} & \textbf{闭环} & \textbf{端到端验收}\\
+  \midrule
+  1 & 开发上线 & 少量改造、云端构建、发布；符合性检查通过后上线，并且可以回滚\\
+  2 & 对话服务 & 提问或定时触发，实时流式输出，断线后按序号续读\\
+  3 & 工具执行 & 网关鉴权、短时凭证注入、四类分流，环境交互类工具按需开沙箱\\
+  4 & 审计追责 & 账本完整回放、身份链归因、管理动作关联、哈希链校验通过\\
+  5 & 成本对账 & 按 Agent 和执行的分摊可以解释，与供应商的忙闲账单完成核对\\
+  6 & 安全闭环 & 失控的循环被熔断、越权的调用被拒绝、重复创建返回同一个执行、伪造的用户委托被拒绝、供应商失联时前两道停机闸门仍然生效\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+% =============================================================================
+\section{关键架构决策与取舍}
+\label{sec:adr}
+
+表~\ref{tab:adr} 汇总本文最重要的十二项决策，每项都写明得到了什么、付出了什么。评审时可以逐项质疑。
+
+\begin{table}[htbp]
+\centering
+\caption{关键架构决策}
+\label{tab:adr}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.0cm}L{4.0cm}L{4.6cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{编号} & \textbf{决策} & \textbf{得到} & \textbf{代价与约束}\\
+  \midrule
+  A1 & 用协议适配框架 & 框架可替换，契约稳定 & 需要维护适配器和符合性测试套件\\
+  A2 & 对外完整、对内精简 & 产品体验与运行稳定解耦 & 控制平面承担更多语义\\
+  A3 & 四个维度取代形态硬编码 & 新场景靠组合表达，策略正交 & 能力声明与准入校验更严格\\
+  A4 & 先记账再分发 & 断线续读、事件有序、可回放 & 账本成为关键写路径\\
+  A5 & 网关事件为权威事实 & 不依赖不可信的容器自报 & 网关必须高可用、低延迟\\
+  A6 & 熔断进入第一阶段 & 首次上线就有损失上界 & 增加计数与终止逻辑\\
+  A7 & 令牌分两类，各走各的接口 & 管理面与运行面在结构上隔离 & 令牌交换与接口校验更复杂\\
+  A8 & 三道停机闸门 & 停机不依赖云供应商 & 需要注册表与双网关联动\\
+  A9 & 单库起步、语义先行 & 快速交付且语义一致 & 必须提前治理输出片段带来的写入量\\
+  A10 & 单云落地、契约多云 & 控制初期的运维面 & 迁移能力需要持续演练来证明\\
+  A11 & 自主型延后到第三阶段 & 先解决主流、可治理的工作负载 & 暂不覆盖最高自治的场景\\
+  A12 & 策略包隔离行业逻辑 & 内核可以跨行业复用 & 每个行业要维护自己的策略资产\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+这些决策背后有一个统一的顺序：先建立身份和账本，再扩展记忆和智能调度；先验证最小权限和退出路径，再开放更多工具和更高的自治。
+
+% =============================================================================
+\section{残余风险与后续规范}
+\label{sec:risks}
+
+\subsection{明确接受、持续降低的风险}
+
+有些风险本方案降低了但没有消除，表~\ref{tab:residual} 如实列出，评审和发布时应主动说明。
+
+\begin{table}[htbp]
+\centering
+\caption{残余风险}
+\label{tab:residual}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.4cm}L{5.4cm}Y@{}}
+  \toprule
+  \rowcolor{RustLight}
+  \textbf{风险} & \textbf{降低手段} & \textbf{为什么仍然残余}\\
+  \midrule
+  跨工具的困惑代理 & 风险分级、敏感读取与对外发送的组合双签、参数策略 & 合法权限的组合仍可能被注入指令利用\\
+  文件内容里的隐式指令 & 内容隔离、扫描、工具最小权限 & 非结构化文件可能携带恶意指令\\
+  经外部模型的数据泄露 & 数据分级到模型白名单、日志脱敏 & 第一阶段缺少细粒度的内容防泄露\\
+  供应商对账粒度 & 标签验证、内部三本账 & 粒度最终受供应商账单能力限制\\
+  供应商可见运行明文 & 出网收敛、最小数据、合同与区域约束 & 托管计算天然需要处理明文\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{配套规范}
+
+本文是架构层面的描述。字段级的定义由三份配套规范承载，并与本文分开维护、独立编号：容器契约的字段级规范（序号、事件去重标识、存活探测语义、格式版本、错误类别）发布为 OpenAPI 与 JSON Schema；工具授权模型与身份的详细设计；符合性测试套件，至少包含进程强制终止、执行环境回收后重建、出网封锁三个用例。三者之中，容器契约的规范优先级最高，因为它不可返工——它没有冻结之前，不应并行推进多个 Agent 框架的接入。
+
+% =============================================================================
+\section{结论}
+\label{sec:conclusion}
+
+企业级 Agent 平台的工程范围远大于“把 Agent 放进容器”。模型决定 Agent 怎么推理，运行时决定它在哪里运行，控制平面决定它以谁的身份、在什么边界内、为谁承担成本和责任。
+
+本文提出的架构，用协议代替框架绑定，用四个维度的能力声明代替形态硬编码，用执行环境、对话线程、执行三个概念分开资源、对话和执行，用五条行动通道封闭副作用，用两类令牌隔离、用户委托验签、凭证保险库和三道停机闸门构成身份安全，用统一账本连接事件、审计、计量和恢复，再用五个基本操作的云适配层保留供应商选择权。
+
+这套设计的关键不在组件的数量，而在边界是否可以证明：长期密钥是否从未进入容器，副作用是否没有旁路，事件是否先记账，权限是否只能收窄，成本是否有硬上限，供应商失联时 Agent 是否仍然能被切断。这十条不变量成立，平台才真正拥有控制权。
+
+对企业而言，这意味着三件具体的事：业务团队可以更快地把 Agent 用起来，因为接入、算力和权限不需要每个团队自己解决；安全和审计部门可以放心地批准它进入生产，因为每一次行动都有出口、有记录、有上限；管理层不必为了速度把控制权交给某一家供应商，因为契约之下的一切都可以替换。
+
+企业可以租用智能体运行所需的算力和环境；身份、钥匙、决定权、事实和退出权，应该留在自己手里。

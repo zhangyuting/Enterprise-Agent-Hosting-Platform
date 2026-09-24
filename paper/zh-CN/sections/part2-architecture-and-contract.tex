@@ -1,0 +1,1018 @@
+% =============================================================================
+\whitepaperpart{II}{体系架构与运行契约}
+{从控制权的边界进入工程实现：六层总体架构、四维度能力声明、三层接口、运行状态，以及四种形态各自怎么实现契约。}
+
+% =============================================================================
+\section{总体架构：控制平面自持，执行平面可替换}
+\label{sec:overview}
+
+\subsection{六层视图}
+
+从使用方到云端资源，平台一共有六层边界（图~\ref{fig:overview}）。读这张图要抓住三条线：企业内部系统不是平台的子模块，而是通过明确接口被复用；平台自己的控制平面是一个整体，由企业持有；控制平面与云上执行资源之间隔着一份稳定的契约，契约之下的东西都可以换。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\scriptsize,
+  nodebox/.style={draw=Primary,fill=PrimaryLight,rounded corners=2pt,
+                  minimum height=8mm,text width=2.7cm,align=center,line width=.6pt},
+  built/.style={nodebox,draw=Green,fill=GreenLight},
+  oss/.style={nodebox,draw=Gold,fill=GoldLight},
+  rent/.style={nodebox,draw=Rust,fill=RustLight},
+  neutral/.style={nodebox,draw=Rule,fill=SoftGray},
+  band/.style={draw=Rule,rounded corners=4pt,inner sep=5pt},
+  ownband/.style={band,draw=Primary},
+  execband/.style={band,draw=Rust},
+  label/.style={font=\bfseries\sffamily\small\color{Ink},anchor=east},
+  arrow/.style={-{Stealth[length=1.8mm]},line width=.65pt,color=Muted}
+]
+  \node[neutral] (business) {业务系统／终端用户};
+  \node[neutral,right=2mm of business] (developer) {开发者／CI};
+  \node[neutral,right=2mm of developer] (operator) {运维／审计／风控};
+  \node[band,fit=(business)(developer)(operator)] (users) {};
+  \node[label,left=3mm of users] {使用方};
+
+  \node[built,below=6mm of business] (idp) {身份提供方\\（SSO／IdP）};
+  \node[built,right=2mm of idp] (gateways) {模型网关／工具网关};
+  \node[built,right=2mm of gateways] (enterprise) {CI、财务、事件总线};
+  \node[band,draw=Green,fit=(idp)(gateways)(enterprise)] (entsys) {};
+  \node[label,left=3mm of entsys] {企业内部系统};
+
+  \node[nodebox,below=6mm of idp] (entry) {入口层\\控制台／统一 API／SDK};
+  \node[nodebox,right=2mm of entry] (control) {控制面\\注册／权限／身份／触发};
+  \node[nodebox,right=2mm of control] (data) {数据面\\任务／会话／计量／产物};
+  \node[nodebox,right=2mm of data] (shared) {公共服务层\\模型／工具／凭证／沙箱};
+  \node[oss,below=3mm of control,xshift=1.45cm,text width=5.6cm] (store)
+       {权威存储底座：事件账本／检查点／注册表／会话映射};
+  \node[ownband,fit=(entry)(control)(data)(shared)(store)] (platform) {};
+  \node[label,left=3mm of platform] {企业控制平面};
+
+  \node[draw=Muted,dashed,fill=white,rounded corners=2pt,below=6mm of store,
+        minimum height=8mm,text width=9.6cm,align=center] (l2)
+       {L2 契约：3 个端点 + 6 种事件 + 4 个环境变量 + 四维度能力声明 + 运行令牌 + 三道停机闸门};
+  \node[label,left=3mm of l2] {稳定契约};
+
+  \node[nodebox,below=6mm of l2,xshift=-2.9cm] (adapter) {云适配层\\五个基本操作};
+  \node[nodebox,right=2mm of adapter] (runtime) {Runtime 产品线\\T0／T2／T1};
+  \node[nodebox,right=2mm of runtime] (sandbox) {Sandbox 产品线\\工具沙箱／T3};
+  \node[execband,fit=(adapter)(runtime)(sandbox)] (exec) {};
+  \node[label,left=3mm of exec] {执行平面};
+
+  \node[rent,below=6mm of adapter] (cloudr) {云 A Runtime};
+  \node[rent,right=2mm of cloudr] (clouds) {云 A Sandbox};
+  \node[rent,right=2mm of clouds] (object) {监控面板／对象存储};
+  \node[rent,right=2mm of object,dashed] (cloudb) {云 B（第二阶段）};
+  \node[execband,fit=(cloudr)(clouds)(object)(cloudb)] (cloud) {};
+  \node[label,left=3mm of cloud] {云端资源};
+
+  \draw[arrow] (users) -- (entsys);
+  \draw[arrow] (entsys) -- (platform);
+  \draw[arrow] (platform) -- (l2);
+  \draw[arrow] (l2) -- (exec);
+  \draw[arrow] (exec) -- (cloud);
+\end{tikzpicture}%
+}
+\caption[平台六层总体边界]{企业级 Agent 托管平台的六层总体边界。蓝色为企业自持的平台模块，绿色为复用的企业内部系统，黄色为开放标准，橙色为租用的云端资源}
+\label{fig:overview}
+\end{figure}
+
+从上到下逐层说明：
+
+\begin{description}
+  \item[使用方] 四类角色各走各的入口：业务系统通过统一 API 调用 Agent；终端用户通过业务前端使用；开发者通过 SDK 和命令行接入、构建、发布；运维、审计和风控通过管理控制台查看、停用和回放。
+  \item[企业内部系统] 身份提供方、模型网关、工具网关、CI、财务系统和事件总线。平台不重建这些，而是通过标准接口对接（第~\ref{sec:integration} 节）。
+  \item[企业控制平面] 平台自己的全部逻辑，分五个分区（下一小节）。这一层由企业持有，是控制权所在。
+  \item[稳定契约] 平台与每一个 Agent 容器之间的约定。它在第一天冻结，之后只加不改，所以契约之下的东西可以随意替换，契约之上的东西不用返工。
+  \item[执行平面] Agent 实际运行的地方。云适配层把平台的指令翻译成供应商接口；两条产品线分别承载常驻运行的 Agent 和临时的隔离计算。壳和适配层是平台的，机器是租的。
+  \item[云端资源] 纯租用的机器、沙箱、存储和监控面板。供应商的名字只出现在这一层。
+\end{description}
+
+\subsection{控制平面的五个分区}
+
+控制平面里的模块按五个分区组织，每个分区有一条明确的判据（表~\ref{tab:partitions}），任何新模块都能据此判断自己属于哪里。
+
+\begin{table}[htbp]
+\centering
+\caption{控制平面五个分区及判据}
+\label{tab:partitions}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.6cm}L{5.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{分区} & \textbf{判据} & \textbf{核心模块}\\
+  \midrule
+  入口层 & 人、CI 和业务系统进入平台的入口 & 管理控制台、统一 API（L1）、SDK 与命令行\\
+  控制面 & 低频的治理动作：定义什么能跑、谁能做什么、何时被唤起 & 注册与发布、权限管控、身份与访问管理、定时与事件触发、审批工作台\\
+  数据面 & 每一次执行都要经过的高频链路 & 任务引擎、会话服务、计量与对账、文件与产物、运行监控、中断与恢复\\
+  公共服务层 & 云上的 Agent 调用企业能力时必经的出口 & 模型网关、工具网关、凭证保险库、沙箱服务\\
+  权威存储底座 & 所有控制与运行事实在企业侧的权威来源 & PostgreSQL 事件账本、检查点、注册表、会话映射与哈希链\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+有两点要解释。第一，入口层和公共服务层为什么要分开：入口层的流量方向是“从外面进来”（人和业务系统调用平台），公共服务层的流量方向是“从云上回来”（正在运行的 Agent 调用模型和工具）。两者方向相反、调用者不同、鉴权方式不同，混在一起会让治理规则互相污染。第二，权威存储底座为什么单独成层：它不是某个模块的附属数据库，而是全部模块共同依赖的事实来源，把它单独画出来，是为了强调“这些数据必须在企业手里”。
+
+\subsection{总体架构全景}
+
+图~\ref{fig:panorama} 把全部模块画在一张图上。这是目标架构的全貌，不区分交付阶段（各阶段的范围见第~\ref{sec:mvp} 节）；颜色表示建设方式。读这张图的顺序是从上往下：使用方从入口层进来；企业已有的系统在平台外围被复用；平台自己的控制平面分五个区；一条稳定的容器契约隔开控制平面与执行平面；执行平面里壳是平台的、机器是租的；供应商的名字只出现在最底下的云端资源层。后面的章节会把每一个区域放大：入口层见图~\ref{fig:zoom-entry}，控制面见图~\ref{fig:zoom-control}，数据面见图~\ref{fig:zoom-data}，公共服务层见图~\ref{fig:zoom-shared}，存储底座见图~\ref{fig:zoom-storage}，执行平面与云端资源见图~\ref{fig:zoom-exec}，企业内部系统见图~\ref{fig:zoom-ent}。
+
+\begin{figure}[p]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=1.5mm]
+% ---------- 使用方
+\node[bandtitle] (tU) at (3.5pt,0) {使用方};
+\node[neutral,below=1.5mm of tU.south west,anchor=north west] (u1) {业务系统};
+\node[neutral,right=of u1] (u2) {终端用户};
+\node[neutral,right=of u2] (u3) {开发者 · CI};
+\node[neutral,right=of u3] (u4) {运维 · 审计 · 风控};
+\begin{scope}[on background layer]\node[band,fit=(tU)(u1)(u4)] (BU) {};\end{scope}
+
+% ---------- 企业内部系统
+\node[bandtitle,text=GreenDark,below=3.5mm of BU.south west,anchor=north west,xshift=3.5pt] (tE) {企业内部系统 · 复用与对接，不重建};
+\node[reuse,below=1.5mm of tE.south west,anchor=north west] (e1) {身份提供方（SSO／IdP）};
+\node[reuse,right=of e1] (e2) {模型网关（已建）};
+\node[reuse,right=of e2] (e3) {工具网关（已建）};
+\node[reuse,right=of e3] (e4) {CI 与依赖扫描};
+\node[reuse,below=of e1] (e5) {财务分摊系统};
+\node[reuse,right=of e5] (e6) {风控审批台};
+\node[reuse,right=of e6] (e7) {企业事件总线};
+\node[reuse,right=of e7] (e8) {企业对象存储};
+\begin{scope}[on background layer]\node[band,draw=Green!60!white,fit=(tE)(e1)(e8)] (BE) {};\end{scope}
+
+% ---------- 控制平面
+\node[bandtitle,text=PrimaryDark,anchor=north west] (tC) at ([xshift=6pt,yshift=-5mm]BE.south west) {平台 · 控制平面（企业自持）};
+% 入口层
+\node[bandtitle,below=2.5mm of tC.south west,anchor=north west,xshift=3.5pt] (t1) {入口层 · 人与业务系统进入平台的入口};
+\node[own,text width=3.09cm,below=1.5mm of t1.south west,anchor=north west] (c1) {管理控制台};
+\node[own,text width=3.09cm,right=of c1] (c2) {统一 API（L1）};
+\node[own,text width=3.09cm,right=of c2] (c3) {SDK 与命令行};
+\coordinate (fitpt1) at ($(c1 -| e8.east)+(-6pt,0)$);
+\begin{scope}[on background layer]\node[band,fit=(t1)(c1)(c3)(fitpt1)] (B1) {};\end{scope}
+% 控制面
+\node[bandtitle,below=3mm of B1.south west,anchor=north west,xshift=3.5pt] (t2) {控制面 · 低频治理：什么能跑、谁能做什么、何时被唤起};
+\node[own,text width=3.09cm,below=1.5mm of t2.south west,anchor=north west] (k1) {注册与发布};
+\node[own,text width=3.09cm,right=of k1] (k2) {权限管控};
+\node[own,text width=3.09cm,right=of k2] (k3) {身份与访问管理};
+\node[own,text width=3.09cm,below=of k1] (k4) {定时触发};
+\node[own,text width=3.09cm,right=of k4] (k5) {事件触发};
+\node[own,text width=3.09cm,right=of k5] (k6) {审批工作台};
+\coordinate (fitpt2) at ($(k1 -| e8.east)+(-6pt,0)$);
+\begin{scope}[on background layer]\node[band,fit=(t2)(k1)(k6)(fitpt2)] (B2) {};\end{scope}
+% 数据面
+\node[bandtitle,below=3mm of B2.south west,anchor=north west,xshift=3.5pt] (t3) {数据面 · 高频运行：每一次执行都要经过};
+\node[own,text width=3.09cm,below=1.5mm of t3.south west,anchor=north west] (d1) {任务引擎};
+\node[own,text width=3.09cm,right=of d1] (d2) {会话服务};
+\node[own,text width=3.09cm,right=of d2] (d3) {计量与对账};
+\node[own,text width=3.09cm,right=of d3] (d4) {文件与产物};
+\node[open,text width=3.09cm,below=of d1] (d5) {运行监控};
+\node[own,text width=3.09cm,right=of d5] (d6) {中断与恢复};
+\node[own,text width=3.09cm,right=of d6] (d7) {记忆服务};
+\coordinate (fitpt3) at ($(d1 -| e8.east)+(-6pt,0)$);
+\begin{scope}[on background layer]\node[band,fit=(t3)(d1)(d7)(fitpt3)] (B3) {};\end{scope}
+% 公共服务层
+\node[bandtitle,below=3mm of B3.south west,anchor=north west,xshift=3.5pt] (t4) {公共服务层 · 云上 Agent 调用企业能力的统一出口};
+\node[reuse,text width=3.09cm,below=1.5mm of t4.south west,anchor=north west] (s1) {模型网关};
+\node[reuse,text width=3.09cm,right=of s1] (s2) {工具网关};
+\node[own,text width=3.09cm,right=of s2] (s3) {凭证保险库};
+\node[own,text width=3.09cm,right=of s3] (s4) {沙箱服务};
+\coordinate (fitpt4) at ($(s1 -| e8.east)+(-6pt,0)$);
+\begin{scope}[on background layer]\node[band,draw=Primary!55!white,fit=(t4)(s1)(s4)(fitpt4)] (B4) {};\end{scope}
+% 存储底座
+\node[bandtitle,below=3mm of B4.south west,anchor=north west,xshift=3.5pt] (t5) {权威存储底座 · 所有事实在企业侧的权威来源};
+\node[open,below=1.5mm of t5.south west,anchor=north west,text width=12.8cm] (st) {统一账本库（PostgreSQL）：事件账本 · 检查点 · 注册表 · 会话映射 · 哈希链};
+\coordinate (fitpt5) at ($(st -| e8.east)+(-6pt,0)$);
+\begin{scope}[on background layer]\node[band,fit=(t5)(st)(fitpt5)] (B5) {};\end{scope}
+% 控制平面外框
+\begin{pgfonlayer}{deep}\node[frame,draw=Primary,fill=Primary!4,fit=(tC)(B1)(B2)(B3)(B4)(B5)] (FC) {};\end{pgfonlayer}
+
+% ---------- L2 边界
+\node[draw=Muted,dashed,fill=white,rounded corners=2pt,minimum height=8mm,text width=13.0cm,align=center,
+      font=\sffamily\footnotesize,text=Ink,below=4mm of FC.south,anchor=north] (L2)
+  {稳定契约 · L2 容器契约：3 个端点 · 6 种事件 · 4 个环境变量 · 四维度能力声明 ｜ 运行令牌 ｜ 三道停机闸门};
+
+% ---------- 执行平面
+\node[bandtitle,text=RustDark,anchor=north west] (tX) at ($(L2.south -| FC.west)+(9.5pt,-4mm)$) {平台 · 执行平面（壳与适配层自研，机器租用）};
+\node[own,below=1.5mm of tX.south west,anchor=north west,text width=2.25cm] (x1) {云适配层};
+\node[own,right=of x1,text width=2.25cm] (x2) {多云调度层};
+\node[bandnote,right=3mm of x2,text width=8.0cm,align=left] (xn) {五个基本操作：部署 · 调用 · 取消 · 查询 · 销毁；会话保持、版本切流、忙闲上报都在适配层抽象，不穿透到上层};
+\node[bandtitle,text=RustDark,below=3.5mm of x1.south west,anchor=north west] (tR) {Runtime 产品线 · 托管运行 · 按忙闲计费};
+\node[own,below=1.5mm of tR.south west,anchor=north west,text width=2.25cm] (r1) {T0 运行壳池};
+\node[own,right=of r1,text width=2.25cm] (r2) {T2 SDK 壳};
+\node[own,right=of r2,text width=2.25cm] (r3) {T1 流程执行器};
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tR)(r1)(r3)] (BR) {};\end{scope}
+\node[bandtitle,text=RustDark,anchor=north west] (tS) at ($(BR.north east |- tR.north west)+(3mm,0)$) {Sandbox 产品线 · 临时隔离计算};
+\node[rent,below=1.5mm of tS.south west,anchor=north west,text width=2.25cm] (b1) {工具级沙箱执行};
+\node[own,right=of b1,text width=2.25cm] (b2) {T3 整机 + 垫片};
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tS)(b1)(b2)] (BS) {};\end{scope}
+\coordinate (fitpt7) at ($(x1 -| FC.east)+(-6pt,0)$);
+\begin{pgfonlayer}{deep}\node[frame,draw=Rust,fill=Rust!4,fit=(tX)(x1)(x2)(xn)(BR)(BS)(fitpt7)] (FX) {};\end{pgfonlayer}
+
+% ---------- 云端资源
+\node[bandtitle,text=RustDark,anchor=north west] (tY) at ($(FX.south west -| tE.west)+(0,-4mm)$) {云端资源 · 按量租用；供应商的名字只出现在这一层，随时可换};
+\node[rent,below=1.5mm of tY.south west,anchor=north west,text width=2.48cm] (y1) {云 A · 运行时};
+\node[rent,right=of y1,text width=2.48cm] (y2) {云 A · 沙箱};
+\node[rent,right=of y2,text width=2.48cm] (y3) {观测面板};
+\node[rent,right=of y3,text width=2.48cm] (y4) {对象存储};
+\node[rent,right=of y4,text width=2.48cm] (y5) {云 B · 备用};
+\coordinate (fitpt6) at ($(y1 -| e8.east)+(0,0)$);
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tY)(y1)(y5)(fitpt6)] (BY) {};\end{scope}
+
+% ---------- 图例
+\node[own,below=4mm of BY.south west,anchor=north west,text width=1.6cm,minimum height=6mm] (lg1) {自研};
+\node[reuse,right=of lg1,text width=1.6cm,minimum height=6mm] (lg2) {复用};
+\node[open,right=of lg2,text width=1.6cm,minimum height=6mm] (lg3) {开放标准};
+\node[rent,right=of lg3,text width=1.6cm,minimum height=6mm] (lg4) {租用};
+\node[bandnote,right=3mm of lg4,text width=6.5cm,align=left] {带“租”成分的模块（如注册与发布中的版本切流、会话服务中的会话保持机制）逻辑自研、机械动作租用，按主体颜色标注。};
+\end{tikzpicture}%
+}
+\caption[总体架构全景]{总体架构全景：四层边界与全部模块。颜色表示建设方式；不区分交付阶段，各阶段范围见第~\ref{sec:mvp} 节}
+\label{fig:panorama}
+\end{figure}
+
+表~\ref{tab:modules} 给出每个模块的一句话职责和建设方式；阶段划分只在这张表和第~\ref{sec:mvp} 节出现，架构图本身表达的是目标全貌。
+
+\begin{table}[htbp]
+\centering
+\caption{模块建设矩阵}
+\label{tab:modules}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.7cm}L{2.8cm}L{2.2cm}C{1.5cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{分区} & \textbf{模块} & \textbf{建设方式} & \textbf{交付期} & \textbf{职责}\\
+  \midrule
+  入口层 & 管理控制台 & \tagself & 一期 & 查看、管理、回放与一键停用；每个操作进账本\\
+   & 统一 API（L1） & \tagself & 一期 & 对话、任务、事件、文件；流式输出与断线续读\\
+   & SDK 与命令行 & \tagself{} + \tagrent & 一期 & 少量改造接入、云端构建、发布与符合性检查\\
+  控制面 & 注册与发布 & \tagself{} + \tagrent & 一期 & 不可变版本、灰度、切流、回滚与停用\\
+   & 权限管控 & \tagself & 一期 & 权限交集、白名单、硬性禁止项、工具风险分级\\
+   & 身份与访问管理 & \tagself & 一期 & 主体、责任人、身份链、两类令牌、委托验签\\
+   & 触发与审批 & \tagself & 一至二期 & 定时触发第一期；事件触发与审批工作台第二期\\
+  数据面 & 任务引擎与会话 & \tagself{} + \tagrent & 一期 & 执行状态机、熔断、重试、对话与会话的对应关系\\
+   & 计量与对账 & \tagself & 一期 & 内部分摊账、供应商账与核对账\\
+   & 文件与产物 & \tagself{} + \tagrent & 一期 & 引用管理、预签名直传直取、生命周期\\
+   & 监控与恢复 & \tagopen{} + \tagrent & 一至二期 & OpenTelemetry 埋点第一期；中断执行机制与记忆第二期\\
+  公共服务层 & 双网关、保险库、沙箱 & \tagreuse{} + \tagself & 一期 & 副作用的统一出口、凭证注入、隔离执行\\
+  存储底座 & 统一账本库 & \tagopen & 一期 & 事件、检查点、注册表、映射；按时间点恢复\\
+  执行平面 & 云适配层、T0、T2 & \tagself & 一期 & 五个基本操作、运行壳池、代码型 SDK 壳\\
+   & T1、T3、多云 & \tagself & 二至三期 & 流程执行器、自主型垫片、跨云重放\\
+  云端资源 & 运行时、沙箱、存储 & \tagrent & 一期 & 弹性机器、隔离环境、监控面板和对象存储\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{供应商边界规则}
+
+供应商的名字只允许出现在云端资源层。控制平面和执行平面中如果需要使用供应商的 SDK，必须被云适配层封装，不能穿透到任务引擎、身份、计量或对外 API。这条规则的意义在于：换供应商时，改动范围被限制在适配层一个模块之内。
+
+% =============================================================================
+\section{Agent 的能力声明与准入}
+\label{sec:profile}
+
+这一节对应全景图里的控制面。控制面上的模块都是低频的治理动作（图~\ref{fig:zoom-control}）：注册与发布决定“什么能跑”，权限管控和身份与访问管理决定“谁能做什么”，定时与事件触发决定“何时被唤起”，审批工作台处理需要人介入的高风险操作。这些模块共同回答的问题是“一个 Agent 凭什么被允许运行”，答案就是本节的能力声明与准入规则。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm]
+\node[own,zoom] (k1) {\zc{注册与发布}{不可变版本、灰度、切流、回滚；停用走排空}};
+\node[own,zoom,right=of k1] (k2) {\zc{权限管控}{权限交集、风险分级、硬性禁止项}};
+\node[own,zoom,right=of k2] (k3) {\zc{身份与访问管理}{四类主体、身份链、两类令牌隔离、委托验签}};
+\node[own,zoom,below=of k1] (k4) {\zc{定时触发}{到点创建一次执行，走同一条链路}};
+\node[own,zoom,right=of k4] (k5) {\zc{事件触发}{业务事件创建一次执行}};
+\node[own,zoom,right=of k5] (k6) {\zc{审批工作台}{高风险操作的人工审批与决议回传}};
+\begin{scope}[on background layer]\node[band,fit=(k1)(k6)] {};\end{scope}
+\end{tikzpicture}
+\caption[控制面的六个模块]{控制面的六个模块（全景图中的控制面区域）}
+\label{fig:zoom-control}
+\end{figure}
+
+\subsection{为什么不能把一切都绑在形态上}
+
+第~\ref{sec:agent-def} 节按“控制流由谁决定”划分了四种形态。一个自然的做法是把隔离等级、副作用范围、恢复能力也直接绑在形态上：T0 就是共享池加只读，T2 就是独占容器加受控写。这在一家企业内部能用，但作为通用平台会不断遇到例外——代码型 Agent 需要整机沙箱、问答型 Agent 需要浏览器工具、流程型 Agent 需要独占算力。每出现一个例外，就有人提议加“第五种形态”。
+
+本方案的做法是把这些属性拆成四个相互独立的维度，写在每个 Agent 的\term{能力声明清单（manifest）}里。形态只是四个维度的一组默认值，策略引擎和审计规则按维度执行，不按形态的名字执行。新场景等于新的组合，不是新的形态。
+
+\subsection{四个维度}
+
+\begin{table}[htbp]
+\centering
+\caption{能力声明的四个维度}
+\label{tab:axes}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.6cm}L{6.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{维度} & \textbf{取值} & \textbf{含义与由谁决定}\\
+  \midrule
+  循环归属 \code{loop_owner} & 平台运行壳／平台流程执行器／租户进程／第三方进程 & 谁实现执行循环，也就决定了谁负责实现容器契约；由定义载体决定\\
+  隔离等级 \code{isolation} & 共享池／独占容器／整机虚拟机 & 由风险和工具触达范围推导；平台只能上调，租户不能申请下调\\
+  副作用范围 \code{side_effect} & 只读／受控写／沙箱内／外部 & 由网络策略和工具网关强制，不靠声明\\
+  恢复能力 \code{recovery} & 检查点：每步／每会话／无；中断：冷／热／无 & 由声明加符合性测试认证\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\scriptsize,
+  ax/.style={font=\sffamily\bfseries\footnotesize\color{Ink},anchor=east,text width=2.0cm,align=right},
+  v/.style={rounded corners=2pt,draw=Rule,fill=SoftGray,minimum height=11mm,text width=2.55cm,align=center,inner sep=1.5mm},
+  t0/.style={font=\sffamily\bfseries\tiny,text=PrimaryDark},
+  t1/.style={font=\sffamily\bfseries\tiny,text=GreenDark},
+  t2/.style={font=\sffamily\bfseries\tiny,text=GoldDark},
+  t3/.style={font=\sffamily\bfseries\tiny,text=RustDark}
+]
+  \node[ax] (a1) {循环归属};
+  \node[v,right=3mm of a1] (a1v1) {平台运行壳\\{\tikz\node[t0]{T0};}};
+  \node[v,right=2.5mm of a1v1] (a1v2) {平台流程执行器\\{\tikz\node[t1]{T1};}};
+  \node[v,right=2.5mm of a1v2] (a1v3) {租户进程\\{\tikz\node[t2]{T2};}};
+  \node[v,right=2.5mm of a1v3] (a1v4) {第三方进程\\{\tikz\node[t3]{T3};}};
+
+  \node[ax,below=15mm of a1] (a2) {隔离等级};
+  \node[v,right=3mm of a2] (a2v1) {共享池\\{\tikz\node[t0]{T0};}};
+  \node[v,right=2.5mm of a2v1] (a2v2) {独占容器\\{\tikz\node[t1]{T1};}\ {\tikz\node[t2]{T2};}};
+  \node[v,right=2.5mm of a2v2] (a2v3) {整机虚拟机\\{\tikz\node[t3]{T3};}};
+
+  \node[ax,below=15mm of a2] (a3) {副作用范围};
+  \node[v,right=3mm of a3] (a3v1) {只读\\{\tikz\node[t0]{T0};}};
+  \node[v,right=2.5mm of a3v1] (a3v2) {受控写（经工具网关）\\{\tikz\node[t1]{T1};}\ {\tikz\node[t2]{T2};}};
+  \node[v,right=2.5mm of a3v2] (a3v3) {沙箱内\\{\tikz\node[t3]{T3};}};
+  \node[v,right=2.5mm of a3v3] (a3v4) {外部\\附加条件见 7.3 节};
+
+  \node[ax,below=15mm of a3] (a4) {恢复能力};
+  \node[v,right=3mm of a4] (a4v1) {检查点：每步\\{\tikz\node[t1]{T1};}\ {\tikz\node[t2]{T2};}};
+  \node[v,right=2.5mm of a4v1] (a4v2) {检查点：无\\{\tikz\node[t0]{T0};}};
+  \node[v,right=2.5mm of a4v2] (a4v3) {中断：冷\\{\tikz\node[t1]{T1};}\ {\tikz\node[t3]{T3};}};
+  \node[v,right=2.5mm of a4v3] (a4v4) {中断：无\\{\tikz\node[t0]{T0};}\ 第一阶段默认};
+
+  \node[font=\sffamily\scriptsize\color{Muted},below=6mm of a4v1.south west,anchor=north west]
+    {方框内的 T0--T3 标记是各形态的默认取值；准入按维度的合法组合表判断，不按形态名字判断。};
+\end{tikzpicture}%
+}
+\caption[能力声明的四个维度]{能力声明的四个维度及四种形态的默认取值}
+\label{fig:four-axes}
+\end{figure}
+
+四个维度各有各的“谁说了算”，这是设计的要点。循环归属由定义载体客观决定，租户无法谎报；隔离等级由平台根据风险推导，租户只能接受更严格的等级；副作用范围不看声明，看网络策略和工具网关实际放行了什么；恢复能力可以声明，但要通过符合性测试才算数。四个维度里没有一个是“租户说什么就是什么”。
+
+\subsection{合法组合与准入规则}
+
+准入不再按形态名字硬编码，而是查一张合法组合表。第一阶段的规则如下：
+
+\begin{itemize}
+  \item 副作用范围为“外部”的 Agent，隔离等级必须是独占容器或以上，并且必须每步保存检查点。理由：能对外部系统产生不可逆影响的 Agent，既要隔离得更严，也要保证失败后能从最近的安全点继续，而不是从头重做。
+  \item 没有检查点的 Agent 只允许持有只读工具集，并关闭平台的自动重试。理由：没有检查点就无法判断上次失败前有没有产生副作用，自动重试可能把一个动作做两遍。
+  \item 在中断执行机制上线（第二阶段）之前，任何声明了中断能力的 Agent 都被拒绝准入。理由：平台还不能正确处理它发出的中断请求，与其运行时出错，不如上线前拦住。
+  \item 高风险副作用路径（例如资金操作）只允许平台流程执行器或租户进程承载，并且必须每步检查点、冷中断（释放机器后从存档恢复）、人工审批。理由：这类路径需要能静态分析或能被隔离约束，还要能停下来等人。
+  \item 隔离等级由平台按工具风险自动上调，租户不能申请下调。
+\end{itemize}
+
+这些规则本身也是可以演进的：安全策略、运行实现和产品预设三者独立变化，不需要为每一种新的 Agent 复制一套基础设施。
+
+\subsection{为什么不支持常驻 Agent}
+
+有一类需求会反复被提出：“让一个 Agent 一直跑着盯盘”“持续监听某个队列”。本方案明确不引入“常驻”形态。原因是常驻进程会破坏一个基本假设——\term{执行（Run）}是计量、审计、取消和重放的基本单位。一个永远不结束的进程，费用没法归到某一次行动，审计没有起止，取消没有安全点。
+
+正确的建模方式是：把“持续监听”变成定时触发或事件触发，每次触发创建一个有边界的执行。这样每一次行动都能单独计费、单独授权、单独追责。定时触发在第一阶段交付，事件触发在第二阶段。
+
+% =============================================================================
+\section{三层接口：对外功能完整，对内约定精简}
+\label{sec:interfaces}
+
+\subsection{三层各管什么}
+
+平台一共有三层接口（图~\ref{fig:l1l2l3}）：面向使用方的统一 API（L1），平台与容器之间的容器契约（L2），容器调用企业能力时经过的服务出口（L3）。三层的设计取向刻意相反：L1 尽可能丰富，让业务系统直接得到产品语义；L2 尽可能薄，让任何框架写的 Agent 都能轻松满足；L3 是统一出口，让容器无论怎么写都绕不开治理。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\sffamily\small,
+  box/.style={rounded corners=3pt,minimum width=4.1cm,minimum height=1.35cm,
+              align=center,line width=.7pt},
+  arrow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted}
+]
+  \node[box,draw=Primary,fill=PrimaryLight] (l1)
+    {\textbf{L1 统一 API}\\产品语义丰富，对外稳定};
+  \node[box,draw=Ink,fill=SoftGray,right=1cm of l1] (engine)
+    {\textbf{控制平面与任务引擎}\\身份／策略／账本／调度};
+  \node[box,draw=Rust,fill=RustLight,right=1cm of engine] (l2)
+    {\textbf{L2 容器契约}\\3 端点／6 事件／4 变量};
+  \node[box,draw=Green,fill=GreenLight,below=1cm of engine] (l3)
+    {\textbf{L3 服务出口}\\模型／工具／状态／产物};
+  \draw[arrow] (l1) -- (engine);
+  \draw[arrow] (engine) -- (l2);
+  \draw[arrow] (l2) |- (l3);
+  \draw[arrow] (l3) -- (engine);
+\end{tikzpicture}
+\caption[三层接口的职责分离]{L1、L2、L3 三层接口的职责分离}
+\label{fig:l1l2l3}
+\end{figure}
+
+三层之间有一条简单的规则：L1 上所有针对数据面的操作，最终落到容器上都只有三种动作——调用它、探测它是否存活、取消它。凡是需要“记住东西”的能力（对话历史、执行进度、审批单据），一律放在平台侧，不放在容器侧。这条定律回答了“某个功能应该做在平台还是做在容器”的问题：容器只做不需要记忆的事。
+
+\subsection{L1：面向使用方的统一 API}
+
+L1 提供业务能理解的资源，不暴露容器和供应商的概念（表~\ref{tab:l1}）。它是入口层三个模块中面向业务系统的那一个；另外两个——SDK 与命令行、管理控制台——分别面向开发者和运维审计人员（图~\ref{fig:zoom-entry}）。三个入口进来的请求，最终都汇到同一个控制平面、同一本账。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm]
+\node[neutral,text width=3.35cm] (a1) {业务系统 · 终端用户};
+\node[neutral,text width=3.35cm,right=5mm of a1] (a2) {开发者 · CI};
+\node[neutral,text width=3.35cm,right=5mm of a2] (a3) {运维 · 审计 · 风控};
+\node[own,zoom,below=7mm of a1] (b1) {\zc{统一 API（L1）}{对话、任务、事件、文件；流式输出与断线续读}};
+\node[own,zoom,below=7mm of a2] (b2) {\zc{SDK 与命令行}{少量改造接入；云端构建、发布、符合性检查}};
+\node[own,zoom,below=7mm of a3] (b3) {\zc{管理控制台}{查看、停用、回放；每个操作记入账本}};
+\draw[aflow] (a1) -- (b1);
+\draw[aflow] (a2) -- (b2);
+\draw[aflow] (a3) -- (b3);
+\begin{scope}[on background layer]\node[band,fit=(b1)(b3)] {};\end{scope}
+\end{tikzpicture}
+\caption[入口层的三个模块]{入口层：三类使用方各自的入口（全景图中的入口层区域）}
+\label{fig:zoom-entry}
+\end{figure}
+
+
+\begin{table}[htbp]
+\centering
+\caption{L1 统一 API 的资源组}
+\label{tab:l1}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.0cm}L{5.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{资源组} & \textbf{核心操作} & \textbf{关键语义}\\
+  \midrule
+  对话线程 Threads & 创建、查询、拉取历史、删除 & 长期对话记录；历史由平台返回，容器不参与\\
+  执行环境 Sessions & 查询、主动结束 & 短期的隔离执行环境，通常由平台隐式管理\\
+  执行 Runs & 发起、查状态、取消、恢复（第二阶段）、重试 & 同步流式或异步；执行是所有状态机的主语\\
+  事件 Events & 按序号续读 & 客户端只从企业账本读事件，不直连容器\\
+  中断 Interrupts & 待办列表、结构化单据、决议 & 第二阶段；决议复用“恢复”进入同一状态机\\
+  产物与文件 & 声明、上传、下载、删除 & 大对象采用引用式传递和预签名地址，不经过 API 本体\\
+  控制面资源 & Agent、版本、工具、触发器、用量 & 注册、发布、授权、触发和用量查询\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+L1 有几条横切约束，每条都对应一类事故：
+
+\begin{itemize}
+  \item \textbf{创建幂等键。}\code{POST /runs} 支持 \code{Idempotency-Key}，同一调用方在 24 小时内用同一个键重复提交，返回同一个执行。它防的是：业务系统网络超时后重试，结果创建了两个执行，副作用和费用都变成双份。
+  \item \textbf{租户强制过滤。}所有读接口都以租户为强制过滤条件，不是可选参数。它防的是：一个租户猜到别人的执行 ID 后读到别人的事件。
+  \item \textbf{只收平台令牌。}L1 只接受发给人、CI 和业务服务的平台令牌，拒绝容器持有的运行令牌（见第~\ref{sec:iam} 节）。它防的是：容器里的代码拿运行令牌去调管理接口改授权。
+  \item \textbf{链路追踪标识。}所有请求携带标准的链路追踪标识（W3C traceparent），全链路传播。
+\end{itemize}
+
+\subsection{L2：不可返工的最小容器契约}
+
+L2 是平台最重要的长期资产。它不承载任何产品便利性，只表达“任何 Agent 容器都必须履行的最小义务”。契约的全部内容是三个端点、六种事件、四个环境变量和一份能力声明。
+
+\begin{codebox}
+POST /invoke  \{run\_id, thread\_id, input, resume?, context: 只读注入\}\\
+\hspace*{14ex}-> 服务器推送事件流（SSE）\\[0.4em]
+GET  /ping    -> Healthy | HealthyBusy\\[0.4em]
+POST /cancel  \{run\_id\} -> 202
+\end{codebox}
+
+三个端点的含义：\code{/invoke} 是平台把一次执行交给容器，容器以事件流的方式陆续返回结果；\code{/ping} 是平台探测容器是否还活着，“忙”只是一个提示，忙闲的权威判断在平台侧（第~\ref{sec:execplane} 节）；\code{/cancel} 是平台要求容器在下一个安全点退出，如果容器在宽限期内没有退出，云适配层会直接销毁它。
+
+六种事件把各种框架的内部差异归一成同一套语义（表~\ref{tab:l2}）。任何框架只要能把自己的运行过程翻译成这六种事件，就能被平台托管。
+
+\begin{table}[htbp]
+\centering
+\caption{L2 契约的组成}
+\label{tab:l2}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.4cm}L{6.2cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{组成} & \textbf{内容} & \textbf{设计目的}\\
+  \midrule
+  3 个端点 & \code{invoke}、\code{ping}、\code{cancel} & 被调用、报存活、被取消\\
+  6 种事件 & \code{message.delta}（输出片段）、\code{tool.call}（工具调用）、\code{checkpoint}（检查点）、\code{interrupt}（中断请求）、\code{artifact}（产物引用）、\code{run.status}（状态与终态） & 把框架差异归一为事件语义\\
+  4 个环境变量 & \code{MODEL_GATEWAY_URL}、\code{TOOL_HUB_URL}、\code{CHECKPOINT_STORE}、\code{ARTIFACT_STORE} & 只注入平台能力的地址，不注入任何长期密钥\\
+  1 份能力声明 & 四个维度、是否流式、最长运行时长、运行壳版本 & 声明能力、限制和运行壳版本\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+四个环境变量要单独说明：它们是平台告诉容器“模型在哪里、工具在哪里、检查点存哪里、产物存哪里”的方式。容器里没有任何密钥，只有这四个地址；绑定当前执行的短时运行令牌不放在环境变量里，而是随每次调用的只读上下文注入，分钟级有效、到期作废。这就是不变量 1（容器里永无长期密钥）的实现方式。
+
+\subsection{事件的持久化与分发}
+
+容器产生的事件，先由平台记账，再分发给客户端。这样做的目的有三个：客户端断线后可以凭序号从账本续读；容器退出后事件仍然可以回放；事件的顺序由平台统一决定，容器无法伪造顺序。
+
+但“先记账”不能简单理解为每一个输出片段都同步写一次数据库——那会把一次磁盘写入放到每个 token 的流式路径上，流式体验会明显变差。所以不同事件采用不同的持久化等级（表~\ref{tab:persist}）：工具调用、检查点、产物和终态属于事实或控制事件，必须写入主账本成功后才分发；输出片段面向流式体验，分配序号后先写入短期保留的流表并立即分发，再按窗口批量合并成消息记录。
+
+\begin{table}[htbp]
+\centering
+\caption{两类事件的持久化等级}
+\label{tab:persist}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.0cm}L{4.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{事件类别} & \textbf{分发前的条件} & \textbf{故障时的语义}\\
+  \midrule
+  事实与控制事件 & 主事件表提交成功 & 可完整续读和审计，不接受丢失\\
+  输出片段 \code{message.delta} & 短期流表接收并获得序号 & 允许弱持久；最多丢失尚未合并的片段\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+容器提供 \code{event_id} 用于去重，但不能自行决定序号；序号由平台在接收时分配。容器到平台的链路中断时，该执行进入失败态并标记为可重试，是否真的重试由第~\ref{sec:reliability} 节的规则决定。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  box/.style={draw=Primary,fill=PrimaryLight,rounded corners=2pt,
+              minimum width=2.45cm,minimum height=10mm,align=center,line width=.7pt},
+  store/.style={box,draw=Gold,fill=GoldLight},
+  arrow/.style={-{Stealth[length=2mm]},line width=.75pt,color=Muted},
+  stepbadge/.style={circle,draw=Primary,fill=white,minimum size=4.8mm,inner sep=0pt,
+                    font=\sffamily\bfseries\tiny,text=PrimaryDark,line width=.65pt}
+]
+  \node[box] (client) {调用方};
+  \node[box,right=7mm of client] (api) {统一 API／任务引擎};
+  \node[box,right=7mm of api] (container) {Agent 容器};
+  \node[box,draw=Green,fill=GreenLight,right=7mm of container] (gateway) {事件入口};
+  \node[store,right=7mm of gateway] (ledger) {企业侧事件账本};
+  \draw[arrow] (client) -- node[stepbadge]{1} (api);
+  \draw[arrow] (api) -- node[stepbadge]{2} (container);
+  \draw[arrow] (container) -- node[stepbadge]{3} (gateway);
+  \draw[arrow] (gateway) -- node[stepbadge]{4} (ledger);
+  \draw[arrow] (ledger.south) -- ++(0,-8mm) -|
+    node[stepbadge,pos=.52]{5} (client.south);
+\end{tikzpicture}%
+}
+\par\smallskip
+{\scriptsize\color{Muted}
+  \textbf{1} 创建执行\quad
+  \textbf{2} 调用容器契约\quad
+  \textbf{3} 上报六种事件\quad
+  \textbf{4} 分配序号并按事件等级写入\quad
+  \textbf{5} 流式分发、断线续读与审计回放\par}
+\caption[事件先记账再分发]{事件先记账再分发：事实事件强持久后分发，输出片段经短期流表降低流式延迟}
+\label{fig:event-flow}
+\end{figure}
+
+\subsection{契约怎么演进}
+
+六种事件的格式在第一阶段冻结，但冻结不等于永远不变。演进规则是“只加不改”：新增字段必须是可选的；每个事件带 \code{schema_version}；平台至少同时读两个版本一段时间。中断事件和恢复字段在第一阶段就定义好，执行机制到第二阶段再实现——这样第二阶段不需要修改任何已上线容器的契约。
+
+\subsection{L3：容器调用企业能力的出口}
+
+L3 由模型网关、工具网关、检查点存储、产物服务和记忆服务（第二阶段）组成。运行中的容器只能通过 L3 接触外部能力：平台用环境变量注入这些服务的地址，用分钟级有效的运行令牌完成认证。容器不持有管理接口的令牌，也不持有任何长期的工具凭证。第~\ref{sec:shared} 节详细说明这一层。
+
+% =============================================================================
+\section{一次调用的完整过程}
+\label{sec:lifecycle}
+
+前面几节分别讲了架构、能力声明和接口。这一节用一个具体的例子把它们串起来：业务系统请求一个 Agent 读取某项业务数据、生成一份报告文件。这个过程不依赖任何特定的 Agent 框架或云厂商。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\scriptsize,
+  card/.style={rounded corners=3pt,minimum width=3.9cm,minimum height=1.15cm,
+               text width=3.45cm,align=center,line width=.75pt,inner sep=2.5mm},
+  flow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted}
+]
+  \node[card,draw=Primary,fill=PrimaryLight] (s1) {\textbf{1 · 提交}\\业务系统发起执行请求};
+  \node[card,draw=Primary,fill=PrimaryLight,right=7mm of s1] (s2) {\textbf{2 · 准入}\\身份、委托、策略、预算};
+  \node[card,draw=Gold,fill=GoldLight,right=7mm of s2] (s3) {\textbf{3 · 建账}\\创建执行并写入初始事件};
+
+  \node[card,draw=Rust,fill=RustLight,below=7mm of s3] (s4) {\textbf{4 · 调度}\\云适配层部署或复用环境};
+  \node[card,draw=Green,fill=GreenLight,left=7mm of s4] (s5) {\textbf{5 · 推理}\\凭运行令牌调用模型网关};
+  \node[card,draw=Green,fill=GreenLight,left=7mm of s5] (s6) {\textbf{6 · 副作用}\\工具网关鉴权并注入凭证};
+
+  \node[card,draw=Gold,fill=GoldLight,below=7mm of s6] (s7) {\textbf{7 · 存档}\\检查点、工具结果、产物引用};
+  \node[card,draw=Gold,fill=GoldLight,right=7mm of s7] (s8) {\textbf{8 · 分发}\\分配序号，写账本与流表};
+  \node[card,draw=Primary,fill=PrimaryLight,right=7mm of s8] (s9) {\textbf{9 · 结算}\\终态、用量、成本与审计};
+
+  \draw[flow] (s1) -- (s2);
+  \draw[flow] (s2) -- (s3);
+  \draw[flow] (s3) -- (s4);
+  \draw[flow] (s4) -- (s5);
+  \draw[flow] (s5) -- (s6);
+  \draw[flow] (s6) -- (s7);
+  \draw[flow] (s7) -- (s8);
+  \draw[flow] (s8) -- (s9);
+\end{tikzpicture}%
+}
+\caption[一次执行的九个步骤]{一次执行从业务请求到事实结算的九个步骤}
+\label{fig:run-lifecycle}
+\end{figure}
+
+\begin{enumerate}
+  \item \textbf{提交。}业务系统携带自己的平台令牌、一个幂等键，以及一个由身份提供方签发的“代表用户”令牌（如果这次调用是替某个用户发起的），调用 \code{POST /runs}。
+  \item \textbf{准入。}统一 API 从已认证的身份解析出租户，验证用户委托令牌的签名，检查这个 Agent 的版本是否可用、工具授权是否有效、是否触碰硬性禁止项、是否超出预算。任何一项不通过，请求在这里就被拒绝，并以“策略拒绝”而不是“系统错误”记入账本。
+  \item \textbf{建账。}任务引擎按幂等键创建执行（重复提交返回同一个），把准入结果和初始状态写入企业账本。从这一刻起，这次执行有了序号、身份链和预算上限。
+  \item \textbf{调度。}调度器根据能力声明选择执行资源，通过云适配层部署一个新环境或复用现有环境，然后调用容器的 \code{/invoke}。
+  \item \textbf{推理。}容器只持有绑定当前执行的短时令牌。它需要调用模型时，请求统一经过模型网关；网关检查模型白名单、扣减用量预算，并记录这次调用的 token 数。
+  \item \textbf{副作用。}Agent 决定调用一个读取业务数据的工具。工具网关重新计算这个 Agent 此刻的有效权限，检查幂等键，从凭证保险库短时取出所需凭证并代为调用目标系统。容器从头到尾接触不到凭证。
+  \item \textbf{存档。}工具结果、模型结果，以及产生副作用前的检查点都被存档。生成的报告文件只在账本里保存内容摘要和对象存储引用，文件本身走对象存储。
+  \item \textbf{分发。}事件入口完成去重、分配序号，事实事件写入主账本，输出片段写短期流表，然后向客户端流式分发。客户端断线后凭序号续读。
+  \item \textbf{结算。}执行到达终态后，平台汇总模型、工具、运行时、沙箱和存储的用量，生成内部分摊、供应商对账和审计视图。
+\end{enumerate}
+
+从这个过程可以看到几件事：容器在整个过程中没有拿到过任何密钥；每一次对外的动作（调模型、调工具）都经过了一个平台能记录、能拒绝的出口；事件的顺序和真实性由平台而不是容器决定；成本在执行结束时就能归到具体的租户和执行。这四点分别对应可控、可审计、可观察、可计量。
+
+% =============================================================================
+\section{运行时语义：状态、通道与执行事实}
+\label{sec:runtime}
+
+这一节和下一节对应全景图里的数据面（图~\ref{fig:zoom-data}）——每一次执行都要经过的高频链路。任务引擎和会话服务管“这次执行跑到哪、属于哪段对话”，计量与对账管“花了多少”，文件与产物管“产出了什么”，运行监控管“系统健不健康”，中断与恢复和记忆服务是第二阶段加入的两项能力。本节先讲这些模块共同依赖的运行时语义：状态怎么分、通道有几条、执行怎么变化。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm]
+\node[own,zoom] (d1) {\zc{任务引擎}{执行状态机、熔断、安全重试}};
+\node[own,zoom,right=of d1] (d2) {\zc{会话服务}{对话线程与执行环境的权威映射}};
+\node[own,zoom,right=of d2] (d3) {\zc{计量与对账}{内部分摊账、供应商账、核对账}};
+\node[own,zoom,right=of d3] (d4) {\zc{文件与产物}{引用管理；预签名直传直取}};
+\node[open,zoom,below=of d1] (d5) {\zc{运行监控}{开放标准埋点；日志归口与脱敏}};
+\node[own,zoom,right=of d5] (d6) {\zc{中断与恢复}{存档、释放机器、从存档接着执行}};
+\node[own,zoom,right=of d6] (d7) {\zc{记忆服务}{跨会话长期记忆；写入前净化}};
+\begin{scope}[on background layer]\node[band,fit=(d1)(d4)(d7)] {};\end{scope}
+\end{tikzpicture}
+\caption[数据面的七个模块]{数据面的七个模块（全景图中的数据面区域）}
+\label{fig:zoom-data}
+\end{figure}
+
+\subsection{三个不能合并的概念：执行环境、对话线程、执行}
+
+平台用三个概念描述运行时状态，它们经常被混为一谈，但各自管的东西不同（表~\ref{tab:str}）。可以用一个日常比喻：\term{执行环境（Session）}像一次开的独立房间，用完可以关掉；\term{对话线程（Thread）}像这位客户与企业的完整往来记录，可以跨很多次到访；\term{执行（Run）}像一次具体的办事，有开始、有结果、有费用。
+
+\begin{table}[htbp]
+\centering
+\caption{执行环境、对话线程与执行的区别}
+\label{tab:str}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.2cm}YYY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  & \textbf{执行环境 Session} & \textbf{对话线程 Thread} & \textbf{执行 Run}\\
+  \midrule
+  是什么 & 一块隔离执行环境的租约 & 对话消息的历史 & 一次有终态的执行\\
+  管什么 & 隔离、资源、内存中的临时状态 & 多轮对话的上下文连续 & 进度、事件、重试、成本\\
+  生命周期 & 活跃时占用机器，空闲时释放 & 长期，跨多个执行环境 & 分钟到小时\\
+  权威来源 & 平台的会话映射加供应商的租约 & 企业的会话服务 & 任务引擎与事件账本\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+一个对话线程可以跨多个执行环境：每次活跃期绑定一个环境，空闲后环境被释放，下次活跃再开一个。对话线程与执行环境之间的对应关系由企业自己保存（这是权威数据），而“同一个用户的请求尽量落到同一台机器”这类会话保持机制的机械实现可以租用供应商的。
+
+\subsection{五条行动通道与一组状态服务}
+
+一个运行中的 Agent 要对外部世界产生影响，只有五条通道（图~\ref{fig:five-windows}）。这五条通道之外，是由网络策略和沙箱构成的墙。只要平台守住这五条通道，即使完全不信任容器里的代码，也能保证副作用、身份、成本和事件都进入统一的治理链。状态与数据服务（检查点、产物、记忆）是支撑这些通道的状态服务，不算行动通道，因为它们本身不对外部世界产生影响。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  core/.style={circle,draw=Primary,fill=PrimaryLight,minimum size=2.7cm,
+               align=center,line width=.9pt,font=\sffamily\bfseries\normalsize},
+  window/.style={rounded corners=3pt,minimum width=3.0cm,minimum height=10mm,
+                 align=center,line width=.7pt},
+  flow/.style={<->,>=Stealth,line width=.7pt,color=Muted},
+  state/.style={rounded corners=3pt,draw=Gold,fill=GoldLight,
+                minimum width=7.6cm,minimum height=10mm,align=center}
+]
+  \node[core] (agent) {运行中的\\Agent};
+  \node[window,draw=Primary,fill=PrimaryLight,above left=14mm and 20mm of agent] (invoke)
+    {1 · 平台调用\\被调用};
+  \node[window,draw=Green,fill=GreenLight,above right=14mm and 20mm of agent] (model)
+    {2 · 模型网关\\调用模型};
+  \node[window,draw=Green,fill=GreenLight,right=28mm of agent] (tool)
+    {3 · 工具网关\\操作外部系统};
+  \node[window,draw=Rust,fill=RustLight,below right=14mm and 20mm of agent] (human)
+    {4 · 中断请求\\请求人工输入};
+  \node[window,draw=Purple,fill=PurpleLight,below left=14mm and 20mm of agent] (delegate)
+    {5 · Agent 作为工具\\调用其他 Agent};
+  \node[state,below=28mm of agent] (state)
+    {状态服务：检查点 · 文件与产物 · 长期记忆};
+
+  \draw[flow] (agent) -- (invoke);
+  \draw[flow] (agent) -- (model);
+  \draw[flow] (agent) -- (tool);
+  \draw[flow] (agent) -- (human);
+  \draw[flow] (agent) -- (delegate);
+  \draw[flow,dashed] (agent) -- (state);
+\end{tikzpicture}
+\caption[五条行动通道与状态服务]{五条行动通道构成封闭的治理边界，状态服务独立承载恢复与数据}
+\label{fig:five-windows}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{五条行动通道及各自的治理}
+\label{tab:windows}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.6cm}L{4.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{交互} & \textbf{唯一通道} & \textbf{通道上的治理}\\
+  \midrule
+  被调用 & 平台的调用接口 & 鉴权、限速、熔断、放置；容器端口不对公网开放\\
+  调用模型 & 模型网关 & 数据分级、模型白名单、用量预算、计量、黑名单\\
+  操作外部系统 & 工具网关 & 权限交集、风险分级、参数级风控、幂等、权威事件\\
+  请求人工输入 & 中断单据（第二阶段） & 按类型路由、超时处理、审批人和决议进入事件流\\
+  调用其他 Agent & 把目标 Agent 注册为一个工具 & 沿用工具治理；委托只能收窄权限\\
+  \rowcolor{GoldLight}
+  状态与数据 & 检查点、产物、文件、记忆 & 租户隔离、过期清理、引用式传递、写入前净化；不算行动通道\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+这个封闭边界约束的是可识别的接口、网络和平台状态通道。域名解析、时序信号、以及通过产物内容影响后续输入这类隐蔽信道，不在本文的威胁模型之内，需要结合出网代理、内容净化、速率限制和独立的安全评估另行处理。
+
+\subsection{执行的状态机}
+
+每次执行的状态变化很简单（图~\ref{fig:run-state}）：排队、运行、然后进入完成、失败或取消三种终态之一；第二阶段加入“等待输入”状态，用于中断与恢复。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.88\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  state/.style={draw=Primary,fill=PrimaryLight,rounded corners=3pt,
+                minimum width=2.55cm,minimum height=10mm,align=center,line width=.7pt},
+  terminal/.style={state,draw=Muted,fill=SoftGray},
+  wait/.style={state,draw=Gold,fill=GoldLight},
+  arrow/.style={-{Stealth[length=2mm]},line width=.75pt,color=Muted},
+  flowlabel/.style={font=\sffamily\tiny,fill=white,inner xsep=1.5pt,
+                   inner ysep=.7pt,text=Muted}
+]
+  \node[state] (queued) {排队\\queued};
+  \node[state,right=13mm of queued] (running) {运行中\\running};
+  \node[wait,below=15mm of running] (input) {等待输入\\input\_required（第二阶段）};
+  \node[terminal,above right=10mm and 23mm of running] (done) {完成\\completed};
+  \node[terminal,right=31mm of running] (failed) {失败\\failed};
+  \node[terminal,below right=10mm and 23mm of running] (cancel) {取消\\canceled};
+  \draw[arrow] (queued) -- (running);
+  \draw[arrow] (running) -- node[flowlabel,right=1.3mm]{中断} (input);
+  \draw[arrow] (input.west) to[out=180,in=180,looseness=1.35]
+    node[flowlabel,left=1mm]{恢复} (running.west);
+  \draw[arrow] (running) -- (done);
+  \draw[arrow] (running) -- (failed);
+  \draw[arrow] (running) -- (cancel);
+\end{tikzpicture}%
+}
+\caption[执行的状态机]{执行的状态机；策略拒绝和预算超限使用独立的错误类别}
+\label{fig:run-state}
+\end{figure}
+
+失败态带有错误类别，至少包含四种：可重试、不可重试、策略拒绝、预算超限。其中“策略拒绝”要单独说：Agent 被风控拦下来，不是平台故障，而是控制生效的证据。它必须在监控指标、审计记录和调用方看到的错误里与真正的异常区分开，否则运维会把正常的拦截当成故障去“修复”。
+
+\subsection{四类状态各归谁管}
+
+第~\ref{sec:method} 节的原则 4 要求状态归属写明白。表~\ref{tab:state-owner} 是具体的归属，恢复时以此为准。
+
+\begin{table}[htbp]
+\centering
+\caption{四类状态的权威归属与恢复含义}
+\label{tab:state-owner}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.6cm}L{4.8cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{状态} & \textbf{权威归属} & \textbf{恢复时的含义}\\
+  \midrule
+  对话状态 & 会话服务与对话线程 & 提供历史的连续性，但不等于恢复执行\\
+  执行状态 & 检查点 & 决定从哪个安全点继续\\
+  环境状态 & 执行环境的文件系统与产物 & 需要引用、快照或重建\\
+  长期记忆 & 记忆服务（第二阶段） & 不参与执行恢复；写入前净化\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+% =============================================================================
+\section{可靠性与安全控制：熔断、幂等、恢复与停机}
+\label{sec:reliability}
+
+这一节讲四个机制。它们共同回答一个问题：当 Agent 失控、重复、卡住或者必须立刻停下来时，平台靠什么保证损失有上界。
+
+\subsection{熔断：损失的硬上限}
+
+任务引擎为每一次执行设置硬上限：步数、工具调用次数、模型用量、运行时长和估算金额。任何一个维度超限，执行立即转为“预算超限”终态。租户级还有并发数和每日金额的上限，采用可覆盖的默认值；共享池同时设置池级和租户级的并发上限，防止一个租户的突发流量挤占其他租户。
+
+熔断和配额管理是两件事。配额管理包括界面、审批流程、周期性策略，可以在第二阶段建设；熔断是保险丝，必须在第一阶段就有。原因很直接：如果没有熔断，平台会在第一次遇到死循环的 Agent 时才发现，计量系统只能事后解释损失了多少钱，却不能阻止损失发生。熔断的实现成本很低——几个计数器和几次比较——但它是上线首周最可能用到的机制。
+
+\subsection{两类幂等要分开}
+
+“幂等”指同一个操作重复执行不会产生额外效果。平台需要两类幂等，键不同、解决的问题也不同（表~\ref{tab:idem}）。
+
+\begin{table}[htbp]
+\centering
+\caption{两类幂等}
+\label{tab:idem}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.4cm}L{5.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{类型} & \textbf{键} & \textbf{解决的问题}\\
+  \midrule
+  创建幂等 & 调用方作用域内的 \code{Idempotency-Key} & 网络重试不会创建多个执行\\
+  副作用幂等 & \code{run_id} + \code{step_id} + \code{attempt} & 恢复或重试不会把真实动作做第二遍\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+自动重试默认最多三次，逐次拉长间隔。但一次失败能不能自动重试，不看容器自己说什么，看工具网关的幂等台账：只有“自上一个检查点以来没有产生过不可确认的副作用”时，失败才算可重试。没有检查点的 Agent 默认关闭自动重试。
+
+\subsection{等效恰好一次的副作用}
+
+分布式系统无法仅靠一次网络请求保证真实世界里的动作恰好发生一次。本架构用三件事组合出等效的语义：
+
+\[
+  \text{副作用前先保存检查点}
+  + \text{工具网关的幂等台账}
+  + \text{结果存档}
+  \Rightarrow \text{等效恰好一次}
+\]
+
+第一件保证失败后有地方可以回到；第二件保证回到之后不会把已经做过的动作再做一遍；第三件保证模型的输出也被存档——恢复时不重新采样，否则同一次执行可能在恢复后走向另一个分支。
+
+\subsection{三道停机闸门}
+
+停掉一个失控的 Agent，不能依赖云供应商的管理接口在那一刻恰好可用。所以停机路径分三道闸门（图~\ref{fig:three-gate-kill}）：
+
+\begin{enumerate}
+  \item \textbf{停止签发。}在注册表里禁用这个 Agent，平台不再为它签发新的运行令牌。
+  \item \textbf{切断行动。}模型网关和工具网关按 Agent ID 拒绝它已经拿到的令牌。到这一步，它已经不能调模型、不能调工具，也就不能再对外部产生任何副作用。
+  \item \textbf{销毁实例。}云适配层调用供应商接口回收机器。
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.9\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  gate/.style={rounded corners=3pt,minimum width=3.5cm,minimum height=1.25cm,
+               text width=3.1cm,align=center,line width=.8pt},
+  flow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted},
+  tag/.style={font=\sffamily\scriptsize,color=Muted}
+]
+  \node[gate,draw=Primary,fill=PrimaryLight] (g1)
+    {\textbf{第一道 · 停止签发}\\注册表禁用\\不再签发运行令牌};
+  \node[gate,draw=Green,fill=GreenLight,right=9mm of g1] (g2)
+    {\textbf{第二道 · 切断行动}\\模型／工具网关\\拒绝该 Agent ID};
+  \node[gate,draw=Rust,fill=RustLight,right=9mm of g2] (g3)
+    {\textbf{第三道 · 销毁实例}\\云适配层回收\\最终释放资源};
+  \draw[flow] (g1) -- (g2);
+  \draw[flow] (g2) -- (g3);
+  \draw[Primary,line width=.7pt] ([yshift=7mm]g1.north west) --
+    node[tag,above,text=PrimaryDark]{在企业控制边界内立即生效}
+    ([yshift=7mm]g2.north east);
+  \draw[Rust,line width=.7pt] ([yshift=7mm]g3.north west) --
+    node[tag,above,text=RustDark]{依赖供应商，允许最终一致}
+    ([yshift=7mm]g3.north east);
+\end{tikzpicture}%
+}
+\caption[三道停机闸门]{三道停机闸门：前两道先切断行动能力，第三道完成资源回收}
+\label{fig:three-gate-kill}
+\end{figure}
+
+前两道闸门完全在企业控制边界之内。即使第三道暂时失败，Agent 也已经失去了对外行动的能力，剩下的只是一台还在运行但什么都做不了的机器。正常的下线走排空流程：先停止接受新的执行，允许合规的存量执行跑完，关闭挂起的单据，再回收。
+
+\subsection{中断与恢复分三层交付}
+
+“中断与恢复”指 Agent 在执行中途需要等待——等人审批、等外部系统回调、等另一个 Agent 的结果——这时把状态存好、释放机器，等结果回来再从存档处继续。这个需求不限于某一种形态：代码型 Agent 问人、流程型 Agent 等审批，都会用到。
+
+它被拆成三层，分阶段交付（表~\ref{tab:interrupt}）。这样拆的理由是：第一层几乎没有成本，但不做就会导致第二阶段修改所有已上线的容器；第二层随 SDK 一起就有，还顺带解决了长任务故障重跑；真正有工程量的是第三层，而第一阶段的两种形态并不依赖它——问答型的多轮对话是每轮一个执行，不需要执行内部的中断；等待期间的机器成本，供应商按忙闲计费已经覆盖了大半。
+
+\begin{table}[htbp]
+\centering
+\caption{中断与恢复的三层交付}
+\label{tab:interrupt}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.6cm}L{2.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{层} & \textbf{阶段} & \textbf{内容}\\
+  \midrule
+  事件格式冻结 & 第一阶段 & 中断事件和恢复字段进入容器契约，之后不再改契约\\
+  检查点就位 & 第一阶段 & SDK 壳默认配置检查点存储，长任务失败后可以从存档尽力重跑\\
+  执行机制 & 第二阶段 & 保存检查点、释放机器、路由单据、恢复执行、在新环境中从存档继续\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+% =============================================================================
+\section{四种形态各自怎么实现契约}
+\label{sec:fulfil}
+
+四种形态面对的是同一份容器契约，但由谁来实现它各不相同（表~\ref{tab:fulfil}）：问答型和流程型由平台代码实现，合规由平台代码保证；代码型由租户代码通过 SDK 实现，所以需要声明加认证；自主型由平台的垫片替第三方进程实现。
+
+\begin{table}[htbp]
+\centering
+\caption{四种形态实现契约的方式}
+\label{tab:fulfil}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.0cm}L{2.6cm}L{4.8cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{形态} & \textbf{循环归属} & \textbf{平台的实现方式} & \textbf{关键边界}\\
+  \midrule
+  T0 & 平台运行壳 & 共享的无状态运行壳池；按请求注入身份；工具白名单由平台代码决定 & 版本由能力声明和运行壳共同确定\\
+  T1 & 平台流程执行器 & 六种节点的流程描述语言；格式、拓扑和策略的静态分析 & 最终签核的对象必须是声明式流程图\\
+  T2 & 租户进程 & HTTP 加事件流的协议壳、框架适配器、网关与网络兜底 & 能力按恢复、重建、出网三项实测认证\\
+  T3 & 第三方进程 & 编排器或垫片连接整机隔离环境 & 垫片不是安全边界；高风险路径应提炼到 T1\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{T0：平台运行壳}
+
+问答型 Agent 不为每个 Agent 启动独立进程。部署只是在注册表里写一条能力声明，运行发生在共享的运行壳池里。运行壳是无状态的：身份按每个请求注入，系统指令和租户的提示词分段隔离，工具白名单由平台代码决定——租户的提示词只是数据，无论写了什么都不能扩大工具集。
+
+运行壳是全部问答型 Agent 的公共代码，这带来一个必须治理的风险：一次错误的运行壳升级会让数量最多的一类 Agent 同时停摆。所以一个问答型 Agent 的版本不是单一的提示词版本，而是“能力声明版本 + 运行壳版本”的二元组；运行壳升级必须走灰度，注册表允许按租户钉住运行壳版本，运行壳本身也要通过符合性测试。共享池还要设置租户级并发上限，并按活跃时长把供应商的忙时账单分摊给各租户。
+
+\subsection{T1：平台流程执行器（第二阶段）}
+
+流程型 Agent 使用一种刻意受限的流程描述语言，只有六种节点：工具、模型、人工、分支、并行、子流程。分支条件用确定性表达式，节点的输入输出用 JSON Schema 描述。不图灵完备是有意为之——正因为受限，流程图才能在上线前被静态分析，才能被风控签核。
+
+编译分三个阶段：格式校验、拓扑校验、策略静态分析。策略分析里最重要的一项是“支配点检查”：对每一个高风险工具节点，检查所有能到达它的路径是否都必经一个人工审批节点；有一条路径绕过了审批，编译期就拒绝。
+
+平台明令禁止“把代码自动转成流程图后直接运行”。开发者可以写代码，非开发者可以画流程图，机器可以生成流程草稿，但最终签核的对象必须是一张可以静态验证、可以追责的声明式流程图。一张从代码里反推出来、可能残缺的图交给风控签核，等于合规造假。
+
+\subsection{T2：租户容器通过 SDK 实现契约}
+
+代码型 Agent 的实现分三层（图~\ref{fig:t2-shell}）：
+
+\begin{enumerate}
+  \item \textbf{协议壳。}与框架无关的 HTTP 加事件流服务，实现三个端点。它把租户的程序从“跑完就退出的脚本”变成“常驻服务”；端口不对公网开放。
+  \item \textbf{语义适配器。}把具体框架的运行过程翻译成六种事件，把框架的状态保存机制接到平台的检查点存储。平台官方维护少数主流框架的适配器；框架没有的能力不硬造，如实降级声明。
+  \item \textbf{不信任兜底。}这一层与框架无关：权威的工具调用事件来自工具网关，副作用范围由网络策略强制，能力通过实测认证。前两层是给租户的便利，第三层是给平台的保证。
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  layer/.style={rounded corners=3pt,minimum width=6.4cm,minimum height=11mm,
+                align=center,line width=.7pt,text width=6.0cm},
+  side/.style={rounded corners=3pt,minimum width=3.3cm,minimum height=11mm,
+               align=center,line width=.7pt,text width=3.0cm},
+  arrow/.style={-{Stealth[length=2mm]},line width=.75pt,color=Muted},
+  cbox/.style={draw=Rust,dashed,rounded corners=4pt,inner sep=4pt,line width=.7pt}
+]
+  \node[layer,draw=Gold,fill=GoldLight] (code) {\textbf{租户代码}\\任意框架编写的 Agent 逻辑};
+  \node[layer,draw=Green,fill=GreenLight,below=3mm of code] (adapter) {\textbf{语义适配器}\\框架事件 $\rightarrow$ 六种事件；框架状态 $\rightarrow$ 检查点存储};
+  \node[layer,draw=Primary,fill=PrimaryLight,below=3mm of adapter] (shell) {\textbf{协议壳}\\HTTP 加事件流：invoke／ping／cancel};
+  \node[cbox,fit=(code)(adapter)(shell)] (container) {};
+  \node[font=\sffamily\scriptsize\color{RustDark},anchor=south west] at (container.north west) {独占容器（平台云端构建，入口锁定）};
+
+  \node[side,draw=Ink,fill=SoftGray,left=9mm of shell] (engine) {\textbf{平台任务引擎}\\调用、探测、取消};
+  \node[side,draw=Green,fill=GreenLight,right=9mm of adapter] (gw) {\textbf{模型网关／工具网关}\\权威事件与凭证注入};
+  \node[side,draw=Muted,fill=white,right=9mm of code] (env) {\textbf{环境变量}\\四个服务地址 + 运行令牌};
+
+  \draw[arrow] (engine) -- (shell);
+  \draw[arrow] (adapter) -- (gw);
+  \draw[arrow] (env) -- (code);
+  \node[font=\sffamily\scriptsize\color{Muted},below=3mm of container.south,text width=11.5cm,align=center]
+    {不信任兜底：权威事件在网关侧、副作用由网络策略强制、能力经实测认证，与容器里的框架无关};
+\end{tikzpicture}%
+}
+\caption[代码型 Agent 的三层实现]{代码型 Agent 的三层实现：租户代码、语义适配器、协议壳，外加与框架无关的不信任兜底}
+\label{fig:t2-shell}
+\end{figure}
+
+存量 Agent 的迁移体验可以概括为“改三处、换一个入口”：模型地址改到模型网关、工具调用改到工具网关、状态保存接到框架的检查点插座，入口由 SDK 壳统一。业务逻辑本身不需要改动。下面是概念性的伪代码，只用来说明迁移边界，不代表真实的 SDK 名称：
+
+\rowcolors{1}{white}{white}
+\begin{codebox}
+\begin{tabular}{@{}l@{}}
+model.base\_url      <- MODEL\_GATEWAY\_URL      \# 模型指向网关\\
+tools.endpoint      <- TOOL\_HUB\_URL           \# 工具指向网关\\
+checkpoint.backend  <- CHECKPOINT\_STORE       \# 状态接到检查点存储\\
+runtime.agent       <- my\_graph               \# 原有业务逻辑不改\\
+runtime.serve()     \# 由 SDK 壳提供 invoke / ping / cancel 与事件流
+\end{tabular}
+\end{codebox}
+
+镜像由平台在云端构建，容器入口由构建流程锁定，租户只能声明依赖和代码目录，不能替换协议壳；壳的版本号随终态事件上报。这不是安全边界（安全边界在网关和网络），而是保证线上行为不漂移：通过了认证的壳，不能在部署时被悄悄换掉。
+
+符合性认证至少包含三个破坏性测试：进程被强制终止后能否按声明恢复；执行环境被回收后能否重建；出网被封锁时是否真的没有旁路。测试套件不属于运行时架构，但它是生产准入不可缺少的交付物。
+
+\subsection{T3：编排器与垫片（第三阶段）}
+
+自主型 Agent 需要把三个经常被混在一起的东西分开：
+
+\begin{itemize}
+  \item \textbf{拓扑。}平台编排器加沙箱内的薄守护进程，或者第三方命令行 Agent 加平台垫片。这是形态定义的内容。
+  \item \textbf{产品。}可选的云端开发环境、长期对话和多人协作。这是产品线，不是形态的一部分。
+  \item \textbf{治理管线。}探索、提炼流程草稿、编译、人工签核，最终进入 T1。这是让 T3 的产出安全地进入生产的通道。
+\end{itemize}
+
+垫片是楔在平台与第三方进程之间的轻量组件，负责六件事：代管进程生命周期、把第三方的输出翻译成六种事件、把它的权限询问转给平台判定、落地平台的指令、只持有短时令牌、处理异常语义。垫片明确不做的事：不做决策、不负责网络封锁、不解析第三方的业务语义。垫片和不受信的进程跑在同一台机器上，设计上必须假设它可能被攻破，所以它不是安全边界；安全边界是整机隔离、模型网关和受控的网络出口。整机快照必须按租户密钥加密、设置过期时间、恢复前扫描已知的密钥模式，短时令牌不进快照、恢复时重新注入。

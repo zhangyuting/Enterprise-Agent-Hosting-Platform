@@ -1,0 +1,138 @@
+% =============================================================================
+\clearpage
+\appendix
+\renewcommand{\thesection}{附录 \Alph{section}}
+\titleformat{\section}[hang]
+  {\sffamily\bfseries\fontsize{17}{22}\selectfont\color{Ink}}
+  {\colorbox{Primary}{\parbox[c][1.55em][c]{4.6em}{\centering\color{white}\small\thesection}}}
+  {0.8em}{}
+  [\vspace{0.24em}{\color{Rule}\titlerule[0.65pt]}]
+
+\section{术语表}
+\label{app:glossary}
+
+按首次出现的顺序排列，第一次接触的读者可以先通读一遍。
+
+\rowcolors{2}{SoftGray}{white}
+\begin{longtable}{@{}>{\bfseries}L{3.4cm}L{\dimexpr\textwidth-3.4cm-2\tabcolsep\relax}@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{术语} & \textbf{含义}\\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{术语} & \textbf{含义}\\
+  \midrule
+  \endhead
+  Agent & 一个可以版本化、可以赋予身份、能在一次执行中根据输入选择模型或工具并产生结果的软件单元。不是一个模型，也不是一段提示词。\\
+  可控／可计量／可观察／可审计 & 平台的四类目标能力：能限制 Agent 做什么；能算清每次执行花了多少；能看到系统健不健康；能回放谁在什么时候做了什么。\\
+  控制平面／执行平面 & 控制平面是企业自己持有的决策与记录部分（身份、权限、任务、账本）；执行平面是 Agent 实际运行的可替换的算力部分。\\
+  运行壳（harness） & 平台自己实现的通用执行循环，负责调用模型和编排工具。问答型 Agent 都跑在它上面。\\
+  T0／T1／T2／T3 & 四种 Agent 形态，按“下一步由谁决定”划分：问答型“照本回答”（平台固定循环）、流程型“按单办事”（事先画好的流程图）、代码型“自带程序入驻”（租户自己的代码）、自主型“请专家自己动手”（现成的强自主 Agent）。\\
+  能力声明清单（manifest） & 每个 Agent 注册时提交的声明，包含四个维度的取值、是否流式、最长运行时长和运行壳版本。\\
+  四个维度 & 能力声明的四个相互独立的维度：循环归属、隔离等级、副作用范围、恢复能力。\\
+  符合性认证 & 能力声明通过破坏性测试（进程强制终止后恢复、执行环境回收后重建、出网封锁）后才生效的机制。\\
+  L1／L2／L3 & 三层接口：对外的统一 API；平台与容器之间的最小契约；容器调用企业能力的服务出口。\\
+  执行（Run） & 一次有开始、有终态、有预算、可以取消的执行，是计量和审计的基本单位。\\
+  对话线程（Thread） & 一段长期的对话历史，可以跨多个执行环境和多次执行。\\
+  执行环境（Session） & 一块隔离执行环境的短期租约，活跃时占用机器，空闲时可以释放。\\
+  检查点 & 执行过程中保存的安全点，失败后可以从这里继续而不是从头重做。\\
+  中断与恢复 & Agent 执行中途需要等待（等人审批、等外部回调）时，存好状态、释放机器，结果回来后从存档继续。\\
+  行动通道 & 运行中的 Agent 对外部世界产生影响的五条路径：被调用、调用模型、调用工具、请求人工输入、调用其他 Agent。\\
+  幂等 & 同一个操作重复执行不会产生额外效果。平台有创建幂等（重复请求不会创建多个执行）和副作用幂等（重试不会把真实动作做两遍）两类。\\
+  熔断 & 每次执行在步数、调用次数、模型用量、时长、金额上的硬上限，任一超限即终止。\\
+  等效恰好一次 & 通过“副作用前保存检查点、工具网关幂等台账、结果存档”三件事组合出的语义：真实世界的动作不会因为重试而重复。\\
+  三道停机闸门 & 停止签发令牌、网关拒绝该 Agent、销毁实例；前两道不依赖云供应商。\\
+  用户委托（OBO，on-behalf-of） & 业务系统替某个终端用户发起调用；“代表谁”必须是身份提供方签发的令牌。\\
+  身份提供方（IdP） & 企业统一的登录与身份签发系统，例如单点登录服务。\\
+  平台令牌／运行令牌 & 两类令牌：前者给人、CI 和业务服务用于统一 API；后者给运行中的容器用于模型、工具等出口，绑定单次执行、分钟级有效。\\
+  权限交集规则 & 有效权限等于能力声明、工具授权、发起方权限三者的交集，再去掉硬性禁止项；任何一方只能收窄，不能放大。\\
+  硬性禁止项 & 对 Agent 类主体永远不开放的操作清单，在身份层就不存在授予它的路径。\\
+  凭证保险库 & 集中保管工具密钥的服务：人只能写入、轮换、吊销，不能读出；只有工具网关能短时取用。\\
+  模型网关／工具网关 & 全部模型调用和全部工具调用各自的唯一出口，也是平台检查、记录、拒绝的位置。\\
+  沙箱 & 用完即毁的隔离执行环境，用于跑代码、操作浏览器等环境交互类工具。\\
+  统一账本 & 企业自持的、只追加的事件记录，同时服务界面、审计和计量。\\
+  哈希链 & 每条事件包含前一条的哈希值，修改任何历史事件都会导致校验失败。\\
+  三本账 & 内部分摊账、供应商账、核对账。\\
+  云适配层 & 把平台的五个基本操作（部署、调用、取消、查询、销毁）翻译成供应商接口的防腐层。\\
+  内核／适配包／策略包 & 跨企业不变的部分；随企业已有系统和供应商替换的部分；随行业和风险偏好变化的部分。\\
+  OpenTelemetry & 可观测性数据的开放标准，规定了埋点方式、数据格式和传输协议；采用它之后更换监控后端只需改数据地址。\\
+  MCP & 模型上下文协议，一种把工具接入大模型应用的开放标准。\\
+  \bottomrule
+\end{longtable}
+
+\section{L2 容器契约速查}
+\label{app:l2}
+
+\rowcolors{2}{SoftGray}{white}
+\begin{longtable}{@{}>{\bfseries}L{2.0cm}L{3.8cm}L{\dimexpr\textwidth-5.8cm-4\tabcolsep\relax}@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{类别} & \textbf{项目} & \textbf{语义}\\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{类别} & \textbf{项目} & \textbf{语义}\\
+  \midrule
+  \endhead
+  端点 & \code{POST /invoke} & 启动或恢复一次执行，返回服务器推送的事件流\\
+  端点 & \code{GET /ping} & 仅作存活探测；忙闲以任务引擎的判断为准\\
+  端点 & \code{POST /cancel} & 请求在安全点退出；宽限期后由云适配层销毁\\
+  事件 & \code{message.delta} & 流式输出片段，短期保留后合并为消息\\
+  事件 & \code{tool.call} & 容器声明的工具调用；以工具网关记录为权威\\
+  事件 & \code{checkpoint} & 执行恢复点，带能力等级\\
+  事件 & \code{interrupt} & 中断请求单据；格式第一阶段冻结，机制第二阶段实现\\
+  事件 & \code{artifact} & 大对象的引用，不内联内容\\
+  事件 & \code{run.status} & 状态、错误类别、运行壳版本\\
+  环境变量 & \code{MODEL_GATEWAY_URL} & 模型的唯一出口地址\\
+  环境变量 & \code{TOOL_HUB_URL} & 工具的唯一出口地址\\
+  环境变量 & \code{CHECKPOINT_STORE} & 检查点服务地址\\
+  环境变量 & \code{ARTIFACT_STORE} & 文件与产物服务地址\\
+  能力声明 & 四个维度、流式、最长时长、壳版本 & 声明能力、限制和运行壳版本；经符合性认证后生效\\
+  错误类别 & retryable／terminal／policy\_denied／budget\_exceeded & 可重试、不可重试、策略拒绝、预算超限\\
+  \bottomrule
+\end{longtable}
+
+\section{十条不变量验收清单}
+\label{app:checklist}
+
+\rowcolors{2}{SoftGray}{white}
+\begin{longtable}{@{}>{\bfseries}C{0.8cm}L{\dimexpr\textwidth-2.2cm-4\tabcolsep\relax}C{1.4cm}@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{\#} & \textbf{验收项} & \textbf{状态}\\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{\#} & \textbf{验收项} & \textbf{状态}\\
+  \midrule
+  \endhead
+  1 & 容器、镜像、日志和快照中不存在长期密钥 & $\square$\\
+  2 & 从容器内直连模型、工具或外网均失败，副作用无法绕过统一出口 & $\square$\\
+  3 & 工具调用的审计以工具网关事件为准，与容器自报可比对 & $\square$\\
+  4 & 企业侧账本只追加，哈希链可验证，篡改历史事件会被发现 & $\square$\\
+  5 & 每次执行的步数、调用次数、模型用量、时长和金额均有硬上限并可触发 & $\square$\\
+  6 & 平台令牌与运行令牌交叉使用均被拒绝 & $\square$\\
+  7 & 伪造的用户委托无法通过身份提供方验签 & $\square$\\
+  8 & 模拟供应商接口不可用时，前两道停机闸门仍然生效 & $\square$\\
+  9 & 事件序号由平台分配，客户端断线后能凭序号续读 & $\square$\\
+  10 & 管理动作与 Agent 动作能在同一条身份链中回放 & $\square$\\
+  \bottomrule
+\end{longtable}
+
+\section{修订记录}
+\label{app:release}
+
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.6cm}L{2.8cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{日期} & \textbf{版本} & \textbf{说明}\\
+  \midrule
+  2026-09-17 & 设计基线 v3.0 & 内部最终设计文档与总体架构图定稿\\
+  2026-09-18 & 技术白皮书 v1.0 & 面向公开发布的参考架构定稿：增加相关工作、一次调用全过程、威胁模型、总体架构全景与各章局部图、术语表；统一术语；去除未经实测的数字\\
+  \bottomrule
+\end{tabularx}

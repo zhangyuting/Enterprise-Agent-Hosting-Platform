@@ -1,0 +1,126 @@
+% =============================================================================
+% 封面
+% =============================================================================
+\hypersetup{pageanchor=false}
+\begin{titlepage}
+  \thispagestyle{empty}
+  \begin{tikzpicture}[remember picture,overlay]
+    % 顶部深色题头
+    \fill[PrimaryDark] (current page.north west) rectangle ([yshift=-11.2cm]current page.north east);
+    \fill[Primary] ([yshift=-11.2cm]current page.north west) rectangle ([yshift=-11.38cm]current page.north east);
+    % 右侧抽象分层装饰(六层边界)
+    \begin{scope}[shift={([xshift=-1.6cm,yshift=-2.0cm]current page.north east)}]
+      \foreach \i/\w in {0/3.4,1/4.3,2/5.2,3/6.1,4/7.0,5/7.9} {
+        \fill[white,opacity=0.045+0.018*\i,rounded corners=1pt]
+          (-\w,-1.05*\i-0.72) rectangle (0,-1.05*\i);
+      }
+    \end{scope}
+    % 题头文字
+    \node[anchor=north west,text=white,opacity=.78,font=\sffamily\small]
+      at ([xshift=2.55cm,yshift=-2.15cm]current page.north west)
+      {技术白皮书 \;·\; 参考架构};
+    \draw[white,opacity=.55,line width=.6pt]
+      ([xshift=2.55cm,yshift=-2.75cm]current page.north west) -- ++(1.8cm,0);
+    \node[anchor=north west,text=white,font=\sffamily\bfseries\fontsize{36}{46}\selectfont,
+          text width=15.5cm,align=left,inner sep=0pt]
+      at ([xshift=2.55cm,yshift=-3.35cm]current page.north west)
+      {企业级 Agent 托管平台\\[0.12em]参考架构};
+    \node[anchor=north west,text=white,opacity=.88,font=\sffamily\fontsize{15.5}{21}\selectfont,inner sep=0pt]
+      at ([xshift=2.55cm,yshift=-7.55cm]current page.north west)
+      {控制自持 \;·\; 算力外租 \;·\; 协议解耦};
+    \node[anchor=north west,text=white,opacity=.70,font=\sffamily\fontsize{10.5}{15}\selectfont,
+          text width=13.4cm,align=left,inner sep=0pt]
+      at ([xshift=2.55cm,yshift=-8.75cm]current page.north west)
+      {一套企业自持控制平面、按量租用云端算力、以协议而非框架托管 Agent 的架构设计};
+  \end{tikzpicture}
+
+  \vspace*{10.3cm}
+
+  % 核心命题
+  \noindent
+  \begin{minipage}{\textwidth}
+    {\sffamily\bfseries\small\color{Primary}核心命题\par}
+    \vspace{0.35em}
+    {\color{Ink}\fontsize{12.5}{19}\selectfont
+    云厂商可以替企业托管机器，却不能替企业回答“谁能跑、谁能干什么、干了什么、花了多少、出了事怎么查”。
+    企业级 Agent 平台要做的，是把不确定的智能行为放进一个确定、可验证、可迁移的边界里。\par}
+  \end{minipage}
+
+  \vspace{1.5cm}
+
+  % 三条设计支柱
+  \noindent
+  \begin{tabularx}{\textwidth}{@{}YYY@{}}
+    {\sffamily\bfseries\color{PrimaryDark}控制自持} &
+    {\sffamily\bfseries\color{PrimaryDark}算力外租} &
+    {\sffamily\bfseries\color{PrimaryDark}协议解耦}\\[0.2em]
+    {\small\color{BodyText}身份、权限、账本、任务状态和接口契约由企业自己持有，构成控制权本身} &
+    {\small\color{BodyText}运行时、沙箱、对象存储和监控面板按量租用，换一家供应商一样能用} &
+    {\small\color{BodyText}平台与 Agent 之间只约定协议，任何框架通过适配器接入，契约不随框架变化}
+  \end{tabularx}
+
+  \vfill
+
+  \noindent{\color{Rule}\rule{\textwidth}{0.6pt}}\par
+  \vspace{0.55cm}
+  \noindent
+  \begin{tabularx}{\textwidth}{@{}L{2.4cm}L{6.2cm}L{2.0cm}Y@{}}
+    {\sffamily\small\color{Muted}作者} & {\sffamily\bfseries\color{Ink}Yuting} &
+    {\sffamily\small\color{Muted}版本} & {\sffamily\bfseries\color{Ink}v1.0}\\[0.35em]
+    {\sffamily\small\color{Muted}日期} & {\sffamily\color{Ink}2026 年 9 月} &
+    {\sffamily\small\color{Muted}文档定位} & {\sffamily\color{Ink}参考架构与设计提案}
+  \end{tabularx}
+  \vspace{0.45cm}
+
+  \noindent{\small\color{Muted}
+    本文描述目标架构、设计约束与分阶段交付边界，不声明既有生产能力、性能水平或商业服务等级。\par}
+\end{titlepage}
+
+\hypersetup{pageanchor=true}
+\pagenumbering{Roman}
+
+% =============================================================================
+% 摘要
+% =============================================================================
+\section*{摘要}
+
+企业里的 AI Agent 正在从零散试验走向统一托管。决定一个 Agent 能否进入生产环境的，往往不是模型本身，而是围绕它的一整套问题：它以谁的身份行动、能碰哪些系统、密钥放在哪里、任务跑到了哪一步、花了多少钱、出了事怎么查、换供应商要付出什么代价。如果这些能力跟着某一家云上运行时一起建设，企业得到的是更快的上线速度，失去的是对身份、策略、密钥和历史事实的控制权。
+
+本文提出一套通用的企业级 Agent 托管平台参考架构。它是一份设计提案，不是实施结果报告。核心做法有四条：企业自己保留控制平面（身份、权限、账本、任务状态和接口契约），把机器、沙箱、对象存储和监控面板按量租用；平台与被托管的 Agent 之间只约定协议，不绑定任何开发框架；Agent 对外部世界的每一次操作——调用模型、调用工具、执行代码——都必须经过平台的统一出口；所有运行事实都记入企业自己持有的账本。
+
+在业界已有的托管运行时、工作负载身份、凭证保管、网关、沙箱和持久执行能力之上，本文重点补充了几项企业侧机制：用四个相互独立的维度描述 Agent 的能力声明；由平台分配事件序号的最小容器契约；包含用户委托、调度主体和硬性禁止项的权限交集规则；供应商失联时仍然生效的三道停机闸门；由检查点、幂等台账和结果固化组成的“等效恰好一次”副作用语义；以及带哈希链、支持合规删除的企业侧事实账本。
+
+{\small\sffamily\color{Muted}
+  \textbf{\color{Ink}关键词：}企业级 Agent；Agent 托管平台；控制平面；工作负载身份；
+  工具治理；统一账本；沙箱；云中立\par}
+
+\subsection*{阅读路线}
+
+本文篇幅较长，不同读者可以按下表选读。第一次接触 Agent 平台的读者，建议先看附录~\ref{app:glossary} 的术语表，再从第~\ref{sec:exec}、\ref{sec:problem}、\ref{sec:agent-def} 节读起，然后跳到第~\ref{sec:lifecycle} 节“一次调用的完整过程”，那一节把全文的机制串在一个具体例子里。
+
+\begin{tabularx}{\textwidth}{@{}L{3.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{读者} & \textbf{建议章节}\\
+  \midrule
+  管理者、决策者 & 第一部分（命题与对象）、第~\ref{sec:overview} 节总体架构、第~\ref{sec:mvp} 节交付路线、第~\ref{sec:conclusion} 节结论\\
+  平台架构师 & 全文；重点是十条不变量、三层接口、运行时语义、身份与权限、架构决策\\
+  实施团队 & 第二、三部分和附录~\ref{app:l2}、\ref{app:checklist}：接口、运行、身份、账本与验收\\
+  安全与审计评审 & 第~\ref{sec:threat} 节威胁模型、第~\ref{sec:iam}--\ref{sec:ledger} 节、第~\ref{sec:risks} 节残余风险\\
+  第一次接触的读者 & 附录~\ref{app:glossary} 术语表 $\rightarrow$ 第~\ref{sec:exec}--\ref{sec:agent-def} 节 $\rightarrow$ 第~\ref{sec:lifecycle} 节\\
+  \bottomrule
+\end{tabularx}
+
+\newpage
+\begingroup
+\footnotesize
+\setlength{\parskip}{0pt}
+\renewcommand{\baselinestretch}{0.92}\selectfont
+\tableofcontents
+\vspace{1.2em}
+\listoffigures
+\vspace{1.2em}
+\listoftables
+\endgroup
+\newpage
+\pagenumbering{arabic}

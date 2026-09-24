@@ -1,0 +1,138 @@
+% =============================================================================
+\clearpage
+\appendix
+\renewcommand{\thesection}{\Alph{section}}
+\titleformat{\section}[hang]
+  {\sffamily\bfseries\fontsize{17}{22}\selectfont\color{Ink}}
+  {\colorbox{Primary}{\parbox[c][1.55em][c]{6.2em}{\centering\color{white}\small Appendix \thesection}}}
+  {0.8em}{}
+  [\vspace{0.24em}{\color{Rule}\titlerule[0.65pt]}]
+
+\section{Glossary}
+\label{app:glossary}
+
+Terms are listed in roughly the order they first appear; first-time readers may find it useful to read the whole list once.
+
+\rowcolors{2}{SoftGray}{white}
+\begin{longtable}{@{}>{\bfseries}L{3.9cm}L{\dimexpr\textwidth-3.9cm-2\tabcolsep\relax}@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Term} & \textbf{Meaning}\\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Term} & \textbf{Meaning}\\
+  \midrule
+  \endhead
+  Agent & A versionable software unit that can be given an identity and that, within one run, chooses models or tools from its input and produces a result. Not a model and not a prompt.\\
+  Controllable / meterable / observable / auditable & The platform's four target properties: it can limit what an agent does, account for what each run cost, see whether the system is healthy, and replay who did what and when.\\
+  Control plane / execution plane & The decision-and-record part the enterprise owns (identity, authorization, tasks, the ledger) versus the replaceable compute part where agents actually run.\\
+  Harness & The general execution loop implemented by the platform, which calls models and orchestrates tools. All Q\&A agents run on it.\\
+  T0 / T1 / T2 / T3 & The four kinds of agent, divided by who decides the next step: Q\&A (``answer from the script'', the platform's fixed loop), workflow (``follow the form'', a workflow drawn in advance), code (``bring your own program'', the tenant's own code), autonomous (``let the expert work'', a ready-made autonomous agent).\\
+  Capability manifest & The declaration submitted when an agent is registered: values on the four axes, a streaming flag, a maximum run duration and the harness version.\\
+  Four axes & The four independent dimensions of the manifest: loop owner, isolation, side-effect scope, recovery.\\
+  Conformance certification & The mechanism by which a declared capability takes effect only after destructive tests (recovery after a process kill, rebuild after session reclaim, egress blocking).\\
+  L1 / L2 / L3 & The three interface layers: the public unified API; the minimal contract between platform and container; the service exits through which containers reach enterprise capabilities.\\
+  Run & One execution with a start, a terminal state, a budget and the ability to be canceled; the unit of metering and audit.\\
+  Thread & A long-lived conversation history that may span many sessions and runs.\\
+  Session & A short-lived lease on an isolated execution environment; occupies a machine while active and may be released when idle.\\
+  Checkpoint & A safe point saved during a run, from which execution can continue after a failure instead of restarting.\\
+  Interrupt and resume & When an agent must wait mid-run (for approval, for a callback), the platform saves its state, releases the machine, and continues from the archive when the result arrives.\\
+  Action channel & One of the five paths through which a running agent can affect the outside world: being called, calling a model, calling a tool, asking a person, calling another agent.\\
+  Idempotency & Repeating an operation produces no additional effect. The platform has creation idempotency (a retry does not create several runs) and side-effect idempotency (a retry does not perform a real action twice).\\
+  Circuit breaker & Hard ceilings on a run's steps, calls, model usage, duration and spend; exceeding any one terminates the run.\\
+  Effectively once & The guarantee composed from a checkpoint before each effect, the tool gateway's idempotency ledger and archived results: a real-world action is not repeated by a retry.\\
+  Three-stage kill switch & Stop issuing tokens, have the gateways reject the agent, destroy the instance; the first two stages do not depend on the cloud vendor.\\
+  On-behalf-of (OBO) delegation & A business system calling on behalf of an end user; ``on whose behalf'' must be a token issued by the identity provider.\\
+  Identity provider (IdP) & The enterprise's central login and identity-issuing system, such as a single sign-on service.\\
+  Platform token / run token & The two token classes: the first for people, CI and business services against the unified API; the second for running containers against the model and tool exits, bound to one run and valid for minutes.\\
+  Permission-intersection rule & Effective permission is the intersection of the manifest, the tool grants and the initiator's own permissions, minus structural denials; any party can only narrow, never widen.\\
+  Structural denials & Operations never available to agent principals; at the identity layer there is no path by which they can be granted.\\
+  Credential vault & The central store for tool secrets: people may write, rotate and revoke but not read; only the tool gateway may fetch, briefly.\\
+  Model gateway / tool gateway & The single exits for all model calls and all tool calls respectively, and the places where the platform checks, records and refuses.\\
+  Sandbox & An isolated execution environment destroyed after use, for environment-interaction tools such as running code or driving a browser.\\
+  Unified ledger & The enterprise-held, append-only record of events that serves the user interface, audit and metering together.\\
+  Hash chain & Each event includes the hash of the previous one; altering any historical event breaks verification.\\
+  Three books & The internal allocation book, the vendor book and the reconciliation book.\\
+  Cloud adapter & The anti-corruption layer that translates the platform's five primitives (deploy, invoke, cancel, status, destroy) into vendor APIs.\\
+  Kernel / adapter packs / policy packs & What stays fixed across enterprises; what is replaced per enterprise and vendor; what varies by industry and risk appetite.\\
+  OpenTelemetry & The open standard for observability data---instrumentation, data format and transport; adopting it makes switching monitoring backends a change of destination address.\\
+  MCP & The Model Context Protocol, an open standard for connecting tools to large-model applications.\\
+  \bottomrule
+\end{longtable}
+
+\section{L2 Container Contract Quick Reference}
+\label{app:l2}
+
+\rowcolors{2}{SoftGray}{white}
+\begin{longtable}{@{}>{\bfseries}L{2.6cm}L{4.2cm}L{\dimexpr\textwidth-6.8cm-4\tabcolsep\relax}@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Class} & \textbf{Item} & \textbf{Semantics}\\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Class} & \textbf{Item} & \textbf{Semantics}\\
+  \midrule
+  \endhead
+  Endpoint & \code{POST /invoke} & Start or resume a run; returns a server-sent event stream\\
+  Endpoint & \code{GET /ping} & Liveness probe only; busy/idle is judged by the task engine\\
+  Endpoint & \code{POST /cancel} & Request exit at a safe point; the cloud adapter destroys after the grace period\\
+  Event & \code{message.delta} & Streamed output fragment; short retention, then merged into a message\\
+  Event & \code{tool.call} & Tool call declared by the container; the tool gateway's record is authoritative\\
+  Event & \code{checkpoint} & A recovery point of the run, with its capability level\\
+  Event & \code{interrupt} & A request-for-input ticket; format frozen in Phase~1, mechanics in Phase~2\\
+  Event & \code{artifact} & A reference to a large object; content is never inlined\\
+  Event & \code{run.status} & State, error class, harness version\\
+  Environment variable & \code{MODEL_GATEWAY_URL} & The single exit for models\\
+  Environment variable & \code{TOOL_HUB_URL} & The single exit for tools\\
+  Environment variable & \code{CHECKPOINT_STORE} & Address of the checkpoint service\\
+  Environment variable & \code{ARTIFACT_STORE} & Address of the files and artifacts service\\
+  Manifest & Four axes, streaming, maximum duration, harness version & Declares capability, limits and the harness version; effective after conformance certification\\
+  Error class & retryable / terminal / policy\_denied / budget\_exceeded & Retryable, not retryable, denied by policy, budget exceeded\\
+  \bottomrule
+\end{longtable}
+
+\section{Ten-Invariant Acceptance Checklist}
+\label{app:checklist}
+
+\rowcolors{2}{SoftGray}{white}
+\begin{longtable}{@{}>{\bfseries}C{0.8cm}L{\dimexpr\textwidth-2.4cm-4\tabcolsep\relax}C{1.6cm}@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{\#} & \textbf{Acceptance item} & \textbf{Status}\\
+  \midrule
+  \endfirsthead
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{\#} & \textbf{Acceptance item} & \textbf{Status}\\
+  \midrule
+  \endhead
+  1 & No long-lived secret exists in containers, images, logs or snapshots & $\mdlgwhtsquare$\\
+  2 & Direct calls from a container to a model, a tool or the internet all fail; side effects cannot bypass the governed exits & $\mdlgwhtsquare$\\
+  3 & Tool-call audit relies on tool-gateway events and can be compared with container self-reports & $\mdlgwhtsquare$\\
+  4 & The enterprise-side ledger is append-only, its hash chain verifies, and tampering with a historical event is detected & $\mdlgwhtsquare$\\
+  5 & Every run has enforceable hard ceilings on steps, calls, model usage, duration and spend & $\mdlgwhtsquare$\\
+  6 & A platform token and a run token used across interfaces are both rejected & $\mdlgwhtsquare$\\
+  7 & A forged delegation fails verification against the identity provider & $\mdlgwhtsquare$\\
+  8 & With the vendor's API simulated as unavailable, the first two kill-switch stages still take effect & $\mdlgwhtsquare$\\
+  9 & Sequence numbers are assigned by the platform and a client resumes from them after a disconnect & $\mdlgwhtsquare$\\
+  10 & Administrative actions and agent actions can be replayed in one identity chain & $\mdlgwhtsquare$\\
+  \bottomrule
+\end{longtable}
+
+\section{Revision History}
+\label{app:release}
+
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.6cm}L{3.6cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Date} & \textbf{Version} & \textbf{Notes}\\
+  \midrule
+  2026-09-17 & Design baseline v3.0 & Internal final design document and overall architecture finalized\\
+  2026-09-18 & Technical white paper v1.0 & Reference architecture for publication: related work, one request end to end, threat model, complete architecture with per-section detail views, glossary; unified terminology; unmeasured figures removed\\
+  \bottomrule
+\end{tabularx}

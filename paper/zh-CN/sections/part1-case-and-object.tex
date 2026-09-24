@@ -1,0 +1,474 @@
+% =============================================================================
+\whitepaperpart{I}{命题与托管对象}
+{先回答三个问题：这个平台为什么要存在，它托管的到底是什么，以及四类 Agent 是怎么划分出来的。}
+
+% =============================================================================
+\section{执行摘要}
+\label{sec:exec}
+
+一个企业级 Agent 平台要能回答五个问题：\textbf{谁能跑、谁能干什么、干了什么、花了多少、出了事怎么查。}这五个问题对应四类平台能力：可控、可计量、可观察、可审计。本文全部的设计都是为了让这四类能力在企业自己手里成立。
+
+云厂商提供的 Agent 运行时负责把请求投递进容器、维持实例、自动伸缩、按“干活／等待”计费。这些事它做得很好，但它并不知道这个容器里的 Agent 是谁、代表谁在行动、被允许碰哪些系统、这次任务算谁的钱、里面发生了什么。它管的是容器，不是 Agent。所以“直接采购云上的 Agent 全套产品”并不会自动补齐企业的治理缺口；相反，它可能把身份、策略、密钥和历史事实一起锁进供应商。
+
+本文的方案建立在六个判断上：
+
+\begin{enumerate}
+  \item \textbf{控制平面由企业自己持有。}注册、身份、权限、任务状态、账本和云适配层是长期控制点，不能外包。
+  \item \textbf{执行平面可以按量租用。}机器、沙箱、对象存储和只读的监控面板不构成决定权，换一家供应商一样能用。
+  \item \textbf{平台绑定协议，不绑定框架。}新的 Agent 开发框架通过适配器接入，平台与容器之间的契约不随框架变化。
+  \item \textbf{能力由声明和实测共同决定。}Agent 的能力声明只是申请，通过符合性测试后才生效。
+  \item \textbf{所有副作用都经过统一出口。}调用模型、调用工具、执行代码，没有绕开平台的路径。
+  \item \textbf{所有事实进入同一本账。}管理员的操作和 Agent 的行为使用同一套身份链、同一个事件序列、同一套审计规则。
+\end{enumerate}
+
+用一句话概括这套架构：企业自持的控制平面决定 Agent 的身份、版本、能力和责任；一份最小的协议连接可替换的云上执行资源；统一的出口限制 Agent 对外部的每一次行动；一本账保存全部权威事实。
+
+这套架构给企业带来的，是四件用平台以外的手段很难同时得到的东西：接入快——存量 Agent 改几行就能托管，问答类 Agent 填提示词就能上线；用得起——机器按量租、等待不花钱、每次执行有硬上限；管得住——每一次对外行动都经过能记录、能拒绝的出口，凭证从不进入 Agent；说得清——任何一次执行都能回放到具体的人、具体的授权、具体的花费，并且换一家云供应商这些记录一条都不丢。
+
+第一阶段只交付两类 Agent（问答型与代码型）、单一云供应商、定时触发和简版控制台。但有几件事必须从第一天做对，因为事后修改的代价是重写全部已上线的 Agent：容器契约的事件格式、权威状态的归属、模型与工具的统一出口、每次执行的硬上限、两类幂等、令牌的接口隔离、用户身份的验签、供应商失联时仍然生效的停机机制，以及账本的哈希链。流程型 Agent、中断与恢复、人工审批、长期记忆、多云和自主型 Agent 在契约稳定后按第二、第三阶段演进。
+
+本文的组织如下。第一部分回答平台为什么存在、托管的对象是什么、设计遵循什么原则，并说明本文与业界已有工作的关系。第二部分是体系架构与运行契约：总体架构、能力声明与准入、三层接口、一次调用的完整过程、运行时语义、可靠性与安全控制、四种形态各自怎么实现契约。第三部分是安全治理：威胁模型、身份与权限、副作用的统一出口、统一账本、权威存储、执行平面与云供应商边界。第四部分讨论产品化与交付：企业系统对接与通用化、分阶段交付与验收、关键决策、残余风险。附录提供术语表、契约速查和验收清单。
+
+% =============================================================================
+\section{问题定义：企业缺的不是容器}
+\label{sec:problem}
+
+\subsection{Agent 和传统服务的区别}
+
+传统的 API 服务，路径是写死的：请求进来，走固定的代码分支，调用固定的下游，消耗大致可预测的资源。Agent 不一样。它会根据上下文自己决定下一步做什么：选哪个模型、调哪个工具、要不要执行一段代码、要不要先停下来等人确认。同一个 Agent 面对不同输入，走的路径可能完全不同。
+
+这带来一种新的风险。传统服务出问题，通常是“答错了”；Agent 出问题，可能是“做错了”——它能以真实身份对真实系统产生副作用：下一笔订单、发一封邮件、改一条记录、执行一段脚本。所以治理 Agent 的重点，从“它说了什么”转向“它能做什么、做了什么、谁授权的”。
+
+\subsection{各团队各自为战会发生什么}
+
+如果企业允许各个团队各自持密钥、各自选框架、各自上云，很快会出现四种断裂：
+
+\begin{itemize}
+  \item \textbf{身份断裂。}机器身份、开发者身份和最终用户身份混在一起，事后无法证明一次操作到底是谁代表谁做的。
+  \item \textbf{治理断裂。}上线检查、工具授权、预算限制和隔离策略散落在各团队的代码和各家供应商的控制台里，没有统一的执行点。
+  \item \textbf{事实断裂。}模型、工具、运行时和文件各有各的日志，格式不同、时间不对齐，无法还原一条完整的责任链。
+  \item \textbf{供应商断裂。}关键状态和专有 API 沉淀在云端，想换供应商时发现要重新实现整个平台。
+\end{itemize}
+
+这四种断裂都不是靠“再买一个更好的运行时”能解决的，因为它们发生在运行时之上、企业自己的边界之内。
+
+\subsection{为什么是现在}
+
+三件事同时发生，使这个问题从“可以以后再说”变成“现在必须回答”。
+
+第一，Agent 正在从试验走向生产。当它只是内部试用的聊天助手时，出错的代价是一个不满意的回答；当它开始接触客户数据、内部系统和真实交易时，出错的代价是一次真实的副作用。治理的需求随接触面的扩大而出现，而不是随模型能力的提高而出现。
+
+第二，云厂商开始成套地提供 Agent 基础设施——运行时、沙箱、身份、网关、记忆、观测打包在一起。这些产品单独看都很好用，但如果企业把身份、策略、密钥和历史事实一并放进某一家的产品线，几年后想换供应商时会发现要重写的不是一个模块，而是整个平台。决定“哪些自己持有、哪些可以租”的时间窗口，就是现在。
+
+第三，审计与合规的要求正在具体化。监管方、内审和风控部门开始问同一个问题：这个自动化的动作是谁授权的、依据什么做的、能不能复现。这个问题无法靠事后拼接各家日志来回答，只能靠一开始就设计好的责任链。
+
+\subsection{云运行时和企业平台各管什么}
+
+表~\ref{tab:division} 把两者的职责放在一起对比。左列是云运行时通常提供的，右列是企业平台仍然要自己负责的。
+
+\begin{table}[htbp]
+\centering
+\caption{云运行时与企业平台的职责分工}
+\label{tab:division}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.6cm}YY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{能力} & \textbf{云运行时通常提供} & \textbf{企业平台仍需负责}\\
+  \midrule
+  计算生命周期 & 部署、伸缩、存活探测、按忙闲计费 & 哪个 Agent、哪个版本、为什么在运行\\
+  身份 & 实例身份或云账号身份 & 用户、服务、调度器、Agent 的身份，以及“代表谁”的身份链\\
+  权限 & 云资源的访问控制 & 能用哪些模型和工具、能碰哪些数据、风险等级、硬性禁止项\\
+  凭证 & 密钥产品或环境变量 & 凭证对 Agent 不可见、按调用注入、每次取用有记录\\
+  状态 & 容器或会话的临时状态 & 对话历史、执行进度、检查点、产物，以及它们之间的权威对应关系\\
+  观测 & 机器日志和资源指标 & 业务事件、策略判定、成本归属、责任回放\\
+  迁移 & 供应商自己的导出功能 & 稳定的契约、企业侧保存的状态、适配器和退出演练\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{thesisbox}
+  \textbf{云厂商管容器，企业平台管 Agent。}容器“活着”不代表 Agent“被允许行动”；供应商账单“准确”也不代表成本“能够归到某个团队”。
+\end{thesisbox}
+
+\subsection{平台带来什么}
+
+四类断裂的反面，就是平台的价值。表~\ref{tab:value} 按受益方列出：每一方得到什么，靠本文的哪些机制得到。
+
+\begin{table}[htbp]
+\centering
+\caption{平台的价值：各受益方得到什么}
+\label{tab:value}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.2cm}YY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{受益方} & \textbf{得到什么} & \textbf{靠什么机制}\\
+  \midrule
+  业务团队 & 填提示词就能上线一个问答 Agent；不用自己管机器、密钥和权限 & 共享运行壳池、能力声明与准入、统一 API\\
+  开发团队 & 存量 Agent 改几处就能托管，任何框架都可以；上线有版本、可回滚 & 协议壳与框架适配器、云端构建、注册与发布\\
+  安全与审计 & 每一次对外行动都经过可记录、可拒绝的出口；凭证从不进入 Agent；任何执行可回放到人 & 五条行动通道、凭证保险库、权限交集、统一账本与哈希链\\
+  财务与成本 & 费用能归到租户、Agent 和单次执行；失控有上限；账单能与供应商核对 & 计量三本账、熔断、忙闲权威判断\\
+  平台与管理层 & 换云供应商不重写平台；停掉失控的 Agent 不依赖供应商；平台能推广到其他业务线 & 容器契约、云适配层、三道停机闸门、内核与策略包分离\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{目标与非目标}
+
+明确不做什么，和明确做什么同样重要。表~\ref{tab:goals} 列出本方案的边界。
+
+\begin{table}[htbp]
+\centering
+\caption{本方案的目标与非目标}
+\label{tab:goals}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.2cm}YY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  & \textbf{本方案做} & \textbf{明确不做}\\
+  \midrule
+  平台 & 打通开发、上线、运行、治理、追责的完整闭环 & 建设一个覆盖所有场景的“万能自主智能体”\\
+  框架 & 租户用任何框架写 Agent，通过协议接入 & 要求租户统一使用某一种开发框架\\
+  算力 & 按量租用运行时与沙箱 & 自建有状态的计算集群\\
+  模型与工具 & 统一出口、统一治理、统一计量 & 自研基础模型，或替代企业已有的工具系统\\
+  多云 & 接口先行、单云落地、迁移可验证 & 第一天就维护多套等价的生产环境\\
+  常驻任务 & 事件触发后每次创建一个独立的执行 & 把常驻守护进程定义为一种新的 Agent 形态\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+% =============================================================================
+\section{平台托管什么：Agent 的定义与四种形态}
+\label{sec:agent-def}
+
+\subsection{什么算一个可托管的 Agent}
+
+本文所说的 Agent，不是一个模型、一段提示词或一个聊天页面，而是一个\term{可以版本化、可以赋予身份、能在一次执行中根据输入和上下文选择模型或工具并产生结果的软件单元}。一个东西只有同时满足下面六项，才进入平台的托管边界：
+
+\begin{enumerate}
+  \item \textbf{有定义载体。}它由提示词、声明式流程图、源代码或第三方进程之一定义。
+  \item \textbf{有稳定身份。}它有自己的 Agent ID，不借用开发者或机器的账号。
+  \item \textbf{有责任人。}有明确的人类负责人（owner）和所属租户，出了事能找到人。
+  \item \textbf{有不可变版本。}能发布、灰度、回滚，并且能对应到它所运行的“运行壳”版本。
+  \item \textbf{有执行边界。}每次工作构成一个有开始、有终态、有预算、可以取消的执行（Run）。
+  \item \textbf{有运行物证。}事件、工具副作用、成本和产物都能进入统一账本。
+\end{enumerate}
+
+这个定义不评价 Agent 有多“聪明”。模型负责生成内容，Agent 负责决策和编排，平台负责限制它的身份、资源、副作用和责任边界。平台治理的对象是“一个能代表某个主体采取行动的软件单元”，而不是智能程度。
+
+\subsection{四种形态怎么划分：看执行循环由谁决定}
+
+一个 Agent 运行起来就是一个循环：看当前状态，决定下一步，执行，再看状态。四种形态只按一个问题划分：\textbf{这个循环的控制流由谁决定？}答案只有四种可能——平台内置的通用循环、租户声明的流程图、租户自己写的代码、第三方进程自己的规划。这个划分和模型强弱、业务价值、风险高低都无关，因此是完备的：不存在第五种“谁来决定循环”的情况。
+
+这里先定义一个后文反复出现的词。\term{运行壳（harness）}指平台自己实现、负责调用模型和编排工具的那个通用执行循环。运行壳是平台代码；租户只通过稳定的协议提交输入、接收事件或声明能力，不修改运行壳本身。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  cardtext/.style={text width=3.3cm,align=left,inner sep=3mm,anchor=north west},
+  cardbox/.style={rounded corners=3pt,line width=.75pt},
+  axis/.style={-{Stealth[length=2mm]},line width=.9pt,color=Muted},
+  note/.style={font=\sffamily\scriptsize,color=Muted}
+]
+  \node[cardtext] (t0) at (0,0)
+    {\textbf{\color{PrimaryDark}T0 · 问答型}\\“照本回答”\\[2pt]{\scriptsize 平台固定循环决定每一步\\租户只填提示词和工具清单\\[2pt]\textcolor{GreenDark}{适合} 问答、摘要、分类\\\textcolor{RustDark}{不适合} 需要确定结果的判定}};
+  \node[cardtext] (t1) at ([xshift=4mm]t0.north east)
+    {\textbf{\color{GreenDark}T1 · 流程型}\\“按单办事”\\[2pt]{\scriptsize 事先画好的流程图决定每一步\\租户交一张可签核的流程图\\[2pt]\textcolor{GreenDark}{适合} 步骤严格的核验、审批\\\textcolor{RustDark}{不适合} 事先定不下路径的任务}};
+  \node[cardtext] (t2) at ([xshift=4mm]t1.north east)
+    {\textbf{\color{GoldDark}T2 · 代码型}\\“自带程序入驻”\\[2pt]{\scriptsize 租户自己的代码决定每一步\\任何框架通过 SDK 接入\\[2pt]\textcolor{GreenDark}{适合} 有开发团队、已有程序\\\textcolor{RustDark}{不适合} 没有开发能力的团队}};
+  \node[cardtext] (t3) at ([xshift=4mm]t2.north east)
+    {\textbf{\color{RustDark}T3 · 自主型}\\“请专家自己动手”\\[2pt]{\scriptsize 现成的强自主 Agent 决定每一步\\平台只管环境和出口\\[2pt]\textcolor{GreenDark}{适合} 尽调、研究、探索\\\textcolor{RustDark}{不适合} 直接执行高风险动作}};
+  % Common bottom edge: the lowest of the four text blocks. Frames are drawn
+  % to this line so all four cards share one height, and the axis runs
+  % horizontally below it whatever the length of the card text.
+  \path let \p1=(t0.south), \p2=(t1.south), \p3=(t2.south), \p4=(t3.south),
+            \n1={min(\y1,\y2,\y3,\y4)} in coordinate (bot) at (0,\n1);
+  \begin{scope}[on background layer]
+    \draw[cardbox,draw=Primary,fill=PrimaryLight] (t0.north west) rectangle (t0.east |- bot);
+    \draw[cardbox,draw=Green,fill=GreenLight]     (t1.north west) rectangle (t1.east |- bot);
+    \draw[cardbox,draw=Gold,fill=GoldLight]       (t2.north west) rectangle (t2.east |- bot);
+    \draw[cardbox,draw=Rust,fill=RustLight]       (t3.north west) rectangle (t3.east |- bot);
+  \end{scope}
+  \coordinate (axL) at ($(t0.west |- bot)+(0,-7mm)$);
+  \coordinate (axR) at ($(t3.east |- bot)+(0,-7mm)$);
+  \draw[axis] (axL) -- (axR);
+  \node[note,anchor=south] at ($(axL)!.2!(axR)+(0,1mm)$) {合规由平台代码保证};
+  \node[note,anchor=south] at ($(axL)!.8!(axR)+(0,1mm)$) {环境自治程度更高};
+  \node[note,anchor=north] at ($(t0.south |- bot)+(0,-9.5mm)$) {默认共享池、只读};
+  \node[note,anchor=north] at ($(t1.south |- bot)+(0,-9.5mm)$) {可静态分析、受控写};
+  \node[note,anchor=north] at ($(t2.south |- bot)+(0,-9.5mm)$) {独占容器、能力经测试认证};
+  \node[note,anchor=north] at ($(t3.south |- bot)+(0,-9.5mm)$) {整机隔离、副作用限于沙箱};
+\end{tikzpicture}%
+}
+\caption[四种 Agent 形态的划分谱系]{T0--T3 是“每一步由谁决定”的谱系，不是能力或成熟度的等级}
+\label{fig:agent-types}
+\end{figure}
+
+图~\ref{fig:agent-types} 从左到右，平台对循环的掌控越来越弱，Agent 所处环境的自治程度越来越高。这决定了平台能用什么手段管它：T0 的循环是平台代码，违规在结构上就不可能发生；T1 的流程图是数据，可以在上线前静态分析；T2 的代码是程序，只能通过隔离和统一出口从外面约束；T3 的第三方进程连代码都不在平台手里，只能靠整机隔离和受控出口。
+
+\subsection{四种形态分别是什么、适合什么}
+
+先用一句话记住四种形态的区别：\textbf{问答型是“照本回答”，流程型是“按单办事”，代码型是“自带程序入驻”，自主型是“请专家自己动手”。}区别的核心只有一点——Agent 的下一步做什么由谁说了算：平台固定的循环、事先画好的流程图、租户自己的代码，还是第三方 Agent 自己的判断。谁说了算，决定了平台能用什么手段管它，也决定了它适合什么业务、不适合什么业务。
+
+\Needspace{12.5cm}
+\begin{tcbraster}[
+  raster columns=2,
+  raster equal height=rows,
+  raster column skip=4mm,
+  raster row skip=4mm
+]
+\begin{tcolorbox}[
+  title={T0 · 问答型 Agent：照本回答},
+  colback=PrimaryLight,colframe=Primary,coltitle=white,
+  fonttitle=\bfseries\sffamily,fontupper=\small,
+  left=2.5mm,right=2.5mm,top=1.5mm,bottom=1.5mm
+]
+\textbf{是什么：}平台准备好一套固定的“看问题、想一想、查工具、给回答”循环，租户只负责填提示词、选模型、勾工具，不写代码。\\
+\textbf{你要提供：}提示词、模型策略、工具清单。\\
+\textbf{适合：}回答错了可以纠正、不产生不可逆后果的场景；数量多、每个都不复杂的场景。\\
+\textbf{不适合：}对结果确定性要求高的场景，例如风控判定、合规审查、资金操作——提示词保证不了某个步骤不被跳过，也保证不了同一个问题两次回答一样。
+\end{tcolorbox}
+\begin{tcolorbox}[
+  title={T1 · 流程型 Agent：按单办事},
+  colback=GreenLight,colframe=Green,coltitle=white,
+  fonttitle=\bfseries\sffamily,fontupper=\small,
+  left=2.5mm,right=2.5mm,top=1.5mm,bottom=1.5mm
+]
+\textbf{是什么：}业务把步骤、分支和人工审核点画成一张流程图，平台的流程执行器逐步执行，每一步都有记录、都能检查。\\
+\textbf{你要提供：}一张可以静态检查的流程图（画布保存，或从自主型的探索轨迹提炼），以及每个节点用到的工具和模型。\\
+\textbf{适合：}执行顺序有严格要求、某些步骤必须不可跳过、需要风控或合规签核后才能上线的业务。\\
+\textbf{不适合：}步骤事先定不下来的探索性任务；也不能当通用编程工具用——流程语言刻意受限，复杂逻辑应该用代码型。
+\end{tcolorbox}
+\begin{tcolorbox}[
+  title={T2 · 代码型 Agent：自带程序入驻},
+  colback=GoldLight,colframe=Gold,coltitle=white,
+  fonttitle=\bfseries\sffamily,fontupper=\small,
+  left=2.5mm,right=2.5mm,top=1.5mm,bottom=1.5mm
+]
+\textbf{是什么：}租户用任何框架写好的 Agent 程序，通过 SDK 接入平台；循环由租户代码控制，平台在外面管出口和账本，不看代码内部。\\
+\textbf{你要提供：}源代码和依赖；存量程序改三处指向（模型、工具、状态）并换一个入口。\\
+\textbf{适合：}有自己的开发团队、已经有业务逻辑或标准操作流程的代码、需要自定义控制循环的团队。\\
+\textbf{不适合：}没有开发能力的业务团队；也不能把“确定性”寄托在代码自觉上——高风险副作用仍然要经过工具网关，平台不信任容器自己上报的副作用和用量。
+\end{tcolorbox}
+\begin{tcolorbox}[
+  title={T3 · 自主型 Agent：请专家自己动手},
+  colback=RustLight,colframe=Rust,coltitle=white,
+  fonttitle=\bfseries\sffamily,fontupper=\small,
+  left=2.5mm,right=2.5mm,top=1.5mm,bottom=1.5mm
+]
+\textbf{是什么：}把一个现成的强自主 Agent（Claude Code、Codex 这类命令行 Agent 及同类产品）放进完整的隔离环境，让它自己规划、自己执行；平台只管它的环境和出口。\\
+\textbf{你要提供：}任务描述、环境声明（软件、数据、网络）、选用的第三方 Agent。\\
+\textbf{适合：}目标清楚但路径不清楚、需要在真实环境里试错、单次任务价值高的工作。\\
+\textbf{不适合：}直接执行高风险副作用——它的产出应经过“探索、提炼成流程图、签核”变成流程型再进生产；也不适合大批量、低单价的重复任务，整机隔离不划算。
+\end{tcolorbox}
+\end{tcbraster}
+
+卡片讲的是每种形态的要点；典型场景、谁来用、平台怎么管、什么时候交付，在表~\ref{tab:types-compare} 里并排给出。放在一起看，选型的判断依据就清楚了：先看你能交给平台什么（提示词、流程图、代码，还是一个现成的 Agent），再看业务对结果确定性的要求，最后看团队有没有开发能力。
+
+\begin{table}[htbp]
+\centering
+\caption{四种形态的对照}
+\label{tab:types-compare}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.3cm}YYYY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{维度} & \textbf{T0 问答型} & \textbf{T1 流程型} & \textbf{T2 代码型} & \textbf{T3 自主型}\\
+  \midrule
+  下一步由谁决定 & 平台固定循环 & 事先画好的流程图 & 租户自己的代码 & 现成的强自主 Agent\\
+  你交给平台什么 & 提示词、工具清单 & 流程图 & 源码与依赖 & 任务、环境、第三方 Agent\\
+  需要开发能力吗 & 不需要 & 业务与风控定义流程，开发提供工具 & 需要 & 不需要写代码，需要会用 Agent\\
+  结果的确定性 & 低，每次可能不同 & 高，步骤可证明 & 取决于代码 & 低，开放式\\
+  典型场景 & 客服、摘要、翻译、分类 & 核验、复核、报表、审批链 & 研究分析、策略、存量应用 & 尽调、数据分析、探索研究\\
+  不适合 & 风控判定、资金操作 & 探索性任务、复杂逻辑 & 无开发团队 & 直接执行高风险动作；批量低价任务\\
+  谁来用 & 业务团队自助 & 业务与风控定义流程，开发提供工具 & 有开发团队的业务线、量化与研究团队 & 研究、分析与工程团队\\
+  平台怎么管 & 循环即平台代码 & 上线前静态分析 & 管出口，不管内部 & 整机隔离加受控出口\\
+  交付阶段 & 第一阶段 & 第二阶段 & 第一阶段 & 第三阶段\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+选型时最常见的三个错误，也顺便在这里说清。第一，用问答型做需要确定性的事：把风控判定、合规审查写成提示词交给问答型 Agent，看起来上线最快，但提示词保证不了步骤不被跳过、同一输入不会给出不同结论，这类业务应该用流程型。第二，让自主型直接碰生产系统：自主型适合探索和形成结论，它跑通的路径应该提炼成流程图、经过签核后再以流程型进入生产，而不是让它直接下单、改配置。第三，把流程型当编程语言：流程语言刻意只有六种节点，就是为了能静态检查、能签核，复杂逻辑硬塞进流程图会失去这个好处，应该用代码型。
+
+要特别说明：T0 到 T3 不是从低级到高级。它们表达的是控制流的归属和治理的成本。风险越高的业务，通常越应该向流程型这种确定性形态收敛，而不是追求更高的自治程度。一个处理资金的流程用流程型写成可签核的流程图，比让自主型的模型自由发挥要安全得多。
+
+\subsection{怎么选形态}
+
+图~\ref{fig:type-selection} 给出一条选择路径，按顺序问三个问题即可。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  question/.style={rounded corners=3pt,draw=Muted,fill=SoftGray,minimum height=11mm,
+                   text width=6.2cm,align=center,inner sep=2mm,line width=.7pt},
+  result/.style={rounded corners=3pt,minimum width=3.0cm,minimum height=11mm,
+                 align=center,line width=.8pt,font=\sffamily\bfseries\footnotesize},
+  flow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted},
+  yes/.style={font=\sffamily\scriptsize,fill=white,inner sep=1.5pt,text=GreenDark},
+  no/.style={font=\sffamily\scriptsize,fill=white,inner sep=1.5pt,text=Muted}
+]
+  \node[question] (q0) {用提示词加一份工具清单，能不能把这件事完整表达出来？};
+  \node[result,draw=Primary,fill=PrimaryLight,text=PrimaryDark,right=14mm of q0] (t0) {T0 问答型};
+  \node[question,below=9mm of q0] (q1) {控制流能不能画成一张流程图，并交给风控签核？};
+  \node[result,draw=Green,fill=GreenLight,text=GreenDark,right=14mm of q1] (t1) {T1 流程型};
+  \node[question,below=9mm of q1] (q2) {是不是需要自己写代码来控制循环？};
+  \node[result,draw=Gold,fill=GoldLight,text=GoldDark,right=14mm of q2] (t2) {T2 代码型};
+  \node[result,draw=Rust,fill=RustLight,text=RustDark,below=9mm of q2] (t3) {T3 自主型};
+
+  \draw[flow] (q0) -- node[yes]{是} (t0);
+  \draw[flow] (q0) -- node[no,right]{否} (q1);
+  \draw[flow] (q1) -- node[yes]{是} (t1);
+  \draw[flow] (q1) -- node[no,right]{否} (q2);
+  \draw[flow] (q2) -- node[yes]{是} (t2);
+  \draw[flow] (q2) -- node[no,right]{否，需要在完整环境里探索} (t3);
+\end{tikzpicture}
+\caption[形态选择路径]{从业务需求到 Agent 形态的选择路径：按顺序问三个问题}
+\label{fig:type-selection}
+\end{figure}
+
+一句口诀：能写成表单的用 T0，能画成流程图的用 T1，必须写代码的用 T2，连流程图都画不出来的用 T3。
+
+\subsection{两个常见的追问}
+
+\textbf{用代码写的流程图算 T1 还是 T2？}算 T2。判断标准是循环由谁持有：用 Python 等语言写出来的图，运行在租户自己的进程里，是程序而不是数据，平台无法在上线前静态分析它。只有由平台的流程执行器运行、用声明式文件描述、可以静态分析和签核的图，才是 T1。
+
+\textbf{多个 Agent 协作算什么形态？}多 Agent 是 Agent 之间的拓扑关系，不是新形态。平台的一等托管对象有三类：Agent、工作流和工具服务（MCP Server）。一个 Agent 调用另一个 Agent，走的是“把对方注册为一个工具”的路径，沿用工具治理的全部规则（见第~\ref{sec:runtime} 节）。
+
+\subsection{形态之间的迁移}
+
+四种形态之间存在有意设计的迁移路径。T3 适合探索：让模型在完整环境里试出一条可行路径。但高风险、需要重复执行的路径不应该一直停留在 T3，而应该经过“探索 $\rightarrow$ 提炼流程草稿 $\rightarrow$ 编译检查 $\rightarrow$ 人工签核”变成一张 T1 流程图，之后生产上跑的永远是签核过的图。反过来，T2 里稳定下来的共性循环也可以下沉成 T0 运行壳的内置能力，让更多团队用配置的方式复用。
+
+% =============================================================================
+\section{设计方法：原则、不变量与建设边界}
+\label{sec:method}
+
+全文的设计可以归结为三个理念。第一，\term{把不确定的行为放进确定的边界}：模型的输出不可预测，但它能接触到什么、能做什么、做了什么被记在哪里，这些边界是确定的，治理的对象是边界而不是模型。第二，\term{控制权来自权威状态和关键出口，而不是来自自己写了多少代码}：谁掌握“真实发生过什么”的记录、谁守着每次行动必经的出口，谁就有控制权；其余都可以租、可以复用。第三，\term{绑定协议，不绑定框架}：Agent 的开发框架会不断更迭，平台只冻结与容器之间的协议，让任何框架通过适配器接入。
+
+下面的八条原则、控制权公式、十条不变量和四种建设方式，都是这三个理念的展开：原则说明怎么做决策，公式说明边界切在哪里，不变量说明什么不能违反，建设方式说明每个模块从哪里来。
+
+\subsection{八条设计原则}
+
+表~\ref{tab:principles} 是全部设计决策的推导起点。后文每一个具体设计，都能回溯到其中一条或几条。
+
+\begin{table}[htbp]
+\centering
+\caption{八条设计原则}
+\label{tab:principles}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}C{0.8cm}L{4.1cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{\#} & \textbf{原则} & \textbf{工程含义}\\
+  \midrule
+  1 & 绑定协议，不绑定框架 & 平台只冻结 HTTP、事件流、工具接入等协议边界；新框架等于一个新适配器，不用重做平台\\
+  2 & 管控性与能力性分开 & 事件真实、副作用受控、网络边界由平台强制，不依赖容器里的代码自觉；检查点、可中断等能力靠框架配合，配合到什么程度就如实声明到什么等级\\
+  3 & 声明加验证，才算能力 & 能力声明是申请，不是可信证明；通过符合性测试后声明才生效\\
+  4 & 状态归属写明白 & 对话、执行、环境、长期记忆四类状态各有权威来源，恢复时听谁的写进契约\\
+  5 & 生成可以不完美，闸门必须确定 & 大模型可以参与生成配置和流程草稿，但最终由格式校验、策略引擎和编译器这类确定性检查收口\\
+  6 & 对外完整，对内精简 & 对外的接口提供完整的产品能力；平台与容器之间的约定只做三件事：被调用、报存活、被取消\\
+  7 & 状态和出口自持，算力外租 & 企业保留权威状态和决定权所在的出口，把有状态计算集群的运维交给供应商\\
+  8 & Agent 是第一类主体 & Agent 与人、服务并列，有负责人、有边界、有物证、有履历、有生命周期\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{控制权公式}
+
+这套架构对“什么该自己做、什么可以外包”的判断，可以压缩成一个公式：
+
+\[
+  \text{控制权} = \text{权威状态的归属} + \text{关键出口的占位}
+\]
+\[
+  \text{运维代价} \approx \text{自己维护的有状态计算集群的规模}
+\]
+
+第一行说的是：谁掌握“真实发生过什么”的权威记录，谁守着“每次行动必经”的出口，谁就拥有控制权。第二行说的是：真正沉重的运维负担来自有状态的计算集群——调度、隔离、伸缩、故障恢复。两行放在一起，结论就清楚了：权威状态和关键出口自己持有（它们不重），计算集群交给供应商（它最重）。这不是“全部自研”，也不是“全部采购”，而是按控制权和运维代价各自的分布切一刀。
+
+\subsection{十条系统不变量}
+
+不变量和功能不一样。功能可以多可以少、可以先做后做；不变量是任何一个实现、任何一家企业的实例都不允许违反的约束，也是交付验收时逐条核对的清单（附录~\ref{app:checklist}）。表~\ref{tab:invariants} 列出十条，每条都给出验证方法，保证它们不是口号。
+
+\begin{table}[htbp]
+\centering
+\caption{十条系统不变量及其验证方式}
+\label{tab:invariants}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}C{0.8cm}L{5.6cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{\#} & \textbf{不变量} & \textbf{验证方式}\\
+  \midrule
+  1 & 容器里永远没有长期密钥 & 扫描镜像、环境变量、进程和快照；凭证只由工具网关在调用时短时取用\\
+  2 & 副作用只走统一出口 & 网络层反向测试：从容器内直连模型、工具或外网必须失败\\
+  3 & 工具调用以工具网关的记录为准 & 对比容器自报事件与网关事件，审计只采信网关一方\\
+  4 & 账本在企业边界内、只追加、带哈希链 & 修改任何一条历史事件都会导致链校验失败\\
+  5 & 每次执行都有硬上限 & 步数、调用次数、模型用量、时长、金额任一超限即被任务引擎终止\\
+  6 & 令牌按接口隔离 & 用运行令牌访问管理接口、用平台令牌访问运行出口，都被拒绝\\
+  7 & 用户身份必须由身份提供方验签 & 伪造的“代表某用户”字符串无法进入身份链\\
+  8 & 停机不依赖云供应商 & 模拟供应商接口不可用，停止签发令牌和网关拒绝仍能让 Agent 失去行动能力\\
+  9 & 事件序号由平台分配，先记账再分发 & 客户端断线后只凭序号就能从账本连续读回\\
+  10 & 管理动作与 Agent 动作记在同一本账 & 发布、授权、停用、轮换密钥都能与运行事件关联回放\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{四种建设方式}
+
+每个模块的建设方式只有四种：自研、复用企业已有系统、采用开放标准、租用云服务。表~\ref{tab:build} 说明各自的适用范围和退出要求。
+
+\begin{table}[htbp]
+\centering
+\caption{四种建设方式}
+\label{tab:build}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.0cm}L{3.8cm}YY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{方式} & \textbf{范围} & \textbf{选择理由} & \textbf{退出要求}\\
+  \midrule
+  \tagself & 身份、权限、账本、任务引擎、云适配层 & 这些构成控制权本身，市场上没有完整现成品 & 元数据和管理接口不依赖任何供应商\\
+  \tagreuse & 身份提供方、模型网关、工具网关、CI、财务系统 & 企业通常已有成熟能力，重建成本高且割裂现有流程 & 通过平台的标准接口做增量对接\\
+  \tagopen & PostgreSQL、OpenTelemetry、事件与对象存储语义 & 成熟生态，降低迁移和运维门槛 & 数据可导出、格式有版本\\
+  \tagrent & 运行时、沙箱、监控面板、对象存储 & 需要弹性、按量计费和供应商的规模效应 & 不握决定权、不独占权威数据、有标准出口\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+哪些云服务可以租，有一把统一的尺子：\textbf{租力气，不租脑子和钥匙。}一个组件只有同时满足三个条件才适合租用——它不握有“能不能做”的决定权；它不托管企业唯一的权威数据（账本、凭证、身份）；它有行业标准，退出成本接近零。用这把尺子量一遍云厂商的全套产品，能通过的只有运行时、沙箱、对象存储和监控面板。监控面板能租，是因为它只读旁观、不碰账本，而且埋点走 OpenTelemetry 开放标准，换一家只改数据地址；云厂商的身份服务、网关、凭证托管、知识库、记忆服务都过不了这三条，因为它们要么握着决定权，要么托管着权威数据。
+
+% =============================================================================
+\section{相关工作与本文定位}
+\label{sec:related}
+
+截至 2026 年 9 月，企业级 Agent 基础设施已经形成几个清晰的共识，本文的设计建立在这些共识之上，而不是另起炉灶。
+
+从各厂商的公开资料看：AWS 的 AgentCore 把运行时、身份、网关、记忆和观测拆成可组合的服务；Anthropic 的 Managed Agents 提供有状态会话和持久事件历史；OpenAI 的 Agents SDK 覆盖会话、沙箱、工具、凭证库、护栏和追踪；Google 的 Agent Platform 提供托管运行时、会话、记忆库、代码执行、访问控制和观测；Microsoft 的 Entra Agent ID 把 Agent 建模为独立的身份主体，强调责任人（sponsor）和生命周期管理。\cite{aws-agentcore,anthropic-managed,openai-agents,google-agent-platform,entra-agent-id}
+
+在执行可靠性和隔离方面，LangSmith Deployment 和 Temporal 提供持久执行、事件历史、中断恢复和长任务编排；腾讯云开源的 CubeSandbox 代表了用微型虚拟机、快照和受控网络承载 Agent 沙箱的基础设施路线。\cite{langsmith-deployment,temporal-durable,cube-sandbox}
+
+2026 年 4 月，Anthropic 和 OpenAI 在同一周各自发布了同构的架构：把负责控制流和模型调用的一层，与负责隔离执行的一层明确拆开，凭证不进入执行沙箱。这说明“控制面与执行面分离、凭证不进沙箱、权威事件在网关侧”已经是行业共识，而不是某一家的独特选择。
+
+\begin{table}[htbp]
+\centering
+\caption{行业已有能力与本文不重复宣称的内容}
+\label{tab:related}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.2cm}L{5.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{行业已具备的能力} & \textbf{代表性先例} & \textbf{本文不重复宣称的内容}\\
+  \midrule
+  托管运行与弹性伸缩 & AgentCore Runtime、Managed Agents、Google Agent Runtime & 把 Agent 部署到托管的计算环境\\
+  身份、凭证与工具治理 & AgentCore Identity 与 Gateway、Entra Agent ID、OpenAI Vaults & Agent 有独立身份、凭证不进业务代码、工具调用受策略约束\\
+  会话、记忆与观测 & Google Sessions 与 Memory Bank、OpenAI tracing、LangSmith & 保存会话状态、追踪调用链、分析运行质量\\
+  持久执行与隔离沙箱 & Temporal、LangGraph 与 LangSmith、CubeSandbox、云端代码执行 & 故障后恢复、等待人工输入、隔离执行代码\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+本文的定位是补齐上述能力之间的\term{企业控制边界}：这些先例各自解决了一段问题，但把它们组合成一个企业能完全掌控、能整体迁移、能对审计负责的平台，中间还缺一组企业侧的契约和机制。本文的增量具体包括：用四个正交维度描述 Agent 能力并经测试认证；由平台分配事件序号的最小容器契约；包含调度主体、用户委托与硬性禁止项的权限交集规则；不依赖供应商管理接口的三道停机闸门；由检查点、工具幂等台账与结果存档组成的“等效恰好一次”语义；以及带哈希链、支持合规删除、能与供应商账单对账的企业侧事实账本。

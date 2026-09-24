@@ -1,0 +1,529 @@
+% =============================================================================
+\whitepaperpart{III}{安全治理与运行控制}
+{把不可信的智能行为约束在可验证的边界内：主体身份、副作用的统一出口、审计账本、权威存储，以及与云供应商的隔离。}
+
+% =============================================================================
+\section{威胁模型与信任边界}
+\label{sec:threat}
+
+先说清楚平台信任谁、不信任谁。平台假设租户代码、模型输出、外部文件和第三方工具的响应都可能是恶意的或被污染的；企业的身份提供方、策略服务、账本写入路径和网关的服务身份属于受控的信任根。云供应商被信任提供合同约定的计算和存储，但不被信任保存唯一的治理事实，也不被信任拥有最终的决定权。
+
+在这个前提下，表~\ref{tab:threats} 列出主要威胁、对应的缓解手段，以及缓解之后仍然需要关注的部分。
+
+\begin{table}[htbp]
+\centering
+\caption{威胁模型}
+\label{tab:threats}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.0cm}L{5.6cm}Y@{}}
+  \toprule
+  \rowcolor{RustLight}
+  \textbf{威胁} & \textbf{主要缓解} & \textbf{仍需关注}\\
+  \midrule
+  恶意或被攻破的租户代码 & 独占容器或微型虚拟机、受控出网、只发短时运行令牌 & 内核与虚拟化逃逸\\
+  提示注入与跨工具的“困惑代理” & 工具白名单、权限交集、参数策略、敏感读取与对外发送分离 & 合法权限的组合被诱导滥用\\
+  凭证窃取 & 凭证只在工具网关短时取用，不进容器、不进模型上下文、不进快照 & 网关的服务身份被攻破\\
+  记忆与文件投毒 & 来源标记、写入前净化、过期清理、读写权限分离 & 非结构化内容里的隐式指令\\
+  绕过审批或重复副作用 & 支配点检查、结构化中断单据、工具幂等台账 & 外部系统本身不支持幂等\\
+  供应商故障或锁定 & 企业自持状态、五个基本操作的适配层、退出演练、三道停机闸门 & 托管计算能看到运行时的明文\\
+  审计抵赖或篡改 & 平台分配序号、只追加的事件、哈希链、独立导出 & 信任根或签名密钥失陷\\
+  沙箱逃逸与资源滥用 & 微型虚拟机、资源硬限额、镜像扫描、到期销毁 & 零日漏洞与隐蔽信道\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+“困惑代理”指这样一种情况：一个 Agent 合法地同时持有 A 工具的读权限和 B 工具的对外发送权限，被注入的恶意指令诱导后，把从 A 读到的机密通过 B 发了出去。每一步都在权限之内，组合起来却是泄露。这是行业尚未彻底解决的问题，本文用风险分级和组合授权双签来降低它，但不声称消除它。
+
+本文不声称消除域名解析、时序、功耗等隐蔽信道，也不覆盖模型权重的供应链、芯片级侧信道，或企业身份提供方自身的失陷。这些风险需要由基础设施安全、供应商管理和组织级的零信任体系共同承担。
+
+% =============================================================================
+\section{身份与权限：Agent 是第一类主体}
+\label{sec:iam}
+
+\subsection{四类主体}
+
+平台里有四类主体（表~\ref{tab:principals}）。前三类是“谁在发起调用”，第四类是“被调用的执行单元”。把 Agent 列为独立主体，是整个身份设计的起点：它不借用开发者的账号，也不借用机器的账号，有自己的 ID、责任人和生命周期。
+
+\begin{table}[htbp]
+\centering
+\caption{四类主体}
+\label{tab:principals}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.8cm}L{3.8cm}L{3.2cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{主体} & \textbf{来源} & \textbf{行动模式} & \textbf{权限上界}\\
+  \midrule
+  用户 & 终端用户，经业务系统委托 & 代表用户（OBO） & 用户自身的权限\\
+  服务 & 业务系统或后端服务 & 以服务身份 & 服务账号的权限\\
+  调度器 & 定时或事件触发 & 以自身身份 & 无用户上界；记录任务创建者\\
+  Agent & 被托管的执行单元 & 由调用方的模式决定 & 能力声明、授权记录、硬性禁止项共同约束\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+调度器是一个容易被忽略的主体。定时任务触发时没有“当前用户”，那么权限的上界取谁？本方案的规则是：定时任务以 Agent 自身身份运行，权限上界是能力声明与授权记录的交集，同时记录任务的创建者作为责任归属；每次触发前检查创建者仍然在职、Agent 未被禁用；创建者离职后，其定时任务随 Agent 一起冻结并进入复审。这条规则防的是“无人负责的自动化”长期运行。
+
+每个 Agent 必须有人类责任人（owner）；责任人离职触发名下 Agent 的复审。注册表里的条目就是 Agent 的身份蓝图，Agent 本体不持有任何长期凭证。
+
+\subsection{有效权限的交集规则}
+
+一次工具调用能不能执行，由下面的交集决定：
+
+\[
+  P_{\text{有效}}
+  =
+  P_{\text{能力声明}}
+  \cap P_{\text{工具授权}}
+  \cap
+  \begin{cases}
+    P_{\text{用户}}, & \text{代表用户}\\
+    P_{\text{服务}}, & \text{以服务身份}\\
+    \Omega, & \text{以自身身份（调度器，不再收窄）}
+  \end{cases}
+  \setminus P_{\text{硬性禁止}}
+\]
+
+读法是：Agent 自己声明能用的，交上管理员授权它用的，再交上发起方本身有权做的（调度器没有“本身的权限”，这一项取全集 $\Omega$，即不再收窄），最后去掉硬性禁止项。三个集合取交集意味着任何一方都只能收窄权限，不能放大——一个 Agent 代表用户行动时，权限不会超过这个用户自己的权限；一个 Agent 被授予了某个工具，如果它的能力声明里没有，也用不了。
+
+硬性禁止项是一份对 Agent 类主体永远不开放的清单（例如修改自身权限、跨租户访问），它不进策略配置，在身份层就不存在授予它的路径。
+
+每一条事件都携带完整的身份链：租户、Agent、版本、执行环境、行动模式、代表谁、审批人。审计时沿着这条链就能回答“这次操作是谁、代表谁、经谁批准做的”。
+
+\subsection{令牌分两类，各走各的接口}
+
+平台发的令牌分两种，各自只能用于一类接口（表~\ref{tab:tokens}、图~\ref{fig:tokens}）。
+
+\begin{table}[htbp]
+\centering
+\caption{两种令牌}
+\label{tab:tokens}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.2cm}L{5.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{令牌} & \textbf{用于哪类接口、谁持有} & \textbf{限制}\\
+  \midrule
+  平台令牌 & 统一 API；持有者是人、CI 和业务服务 & 不能访问模型网关、工具网关、检查点等运行侧出口\\
+  运行令牌 & 模型网关、工具网关、检查点、产物；持有者是运行中的容器 & 绑定单次执行，分钟级有效，限制来源网段，不能访问统一 API\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.86\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  who/.style={rounded corners=3pt,draw=Rule,fill=SoftGray,minimum width=3.2cm,minimum height=10mm,align=center,line width=.7pt},
+  tok/.style={rounded corners=3pt,minimum width=3.0cm,minimum height=10mm,align=center,line width=.8pt},
+  dst/.style={rounded corners=3pt,minimum width=3.4cm,minimum height=10mm,align=center,line width=.7pt},
+  ok/.style={-{Stealth[length=2mm]},line width=.85pt,color=GreenDark},
+  no/.style={-{Stealth[length=2mm]},line width=.85pt,color=Rust,dashed}
+]
+  \node[who] (people) {人／CI／业务服务};
+  \node[tok,draw=Primary,fill=PrimaryLight,right=10mm of people] (ptoken) {\textbf{平台令牌}};
+  \node[dst,draw=Primary,fill=PrimaryLight,right=10mm of ptoken] (l1) {统一 API（管理与调用）};
+
+  \node[who,below=12mm of people] (container) {运行中的容器};
+  \node[tok,draw=Green,fill=GreenLight,right=10mm of container] (rtoken) {\textbf{运行令牌}\\绑定单次执行};
+  \node[dst,draw=Green,fill=GreenLight,right=10mm of rtoken] (gw) {模型／工具网关、检查点、产物};
+
+  \draw[ok] (people) -- (ptoken);
+  \draw[ok] (ptoken) -- (l1);
+  \draw[ok] (container) -- (rtoken);
+  \draw[ok] (rtoken) -- (gw);
+  % 交叉使用：只画短截线并打叉，不让两条拒绝线互相穿越
+  \coordinate (x1) at ($(ptoken.south east)!0.38!(gw.north west)$);
+  \coordinate (x2) at ($(rtoken.north east)!0.38!(l1.south west)$);
+  \draw[no,-] (ptoken.south east) -- (x1);
+  \draw[no,-] (rtoken.north east) -- (x2);
+  \node[font=\sffamily\bfseries\small,text=Rust,inner sep=0pt] at (x1) {$\times$};
+  \node[font=\sffamily\bfseries\small,text=Rust,inner sep=0pt] at (x2) {$\times$};
+  \node[font=\sffamily\tiny,text=Rust,anchor=west,inner sep=1pt] at ([xshift=1.5mm]x1) {平台令牌不能访问运行侧出口};
+  \node[font=\sffamily\tiny,text=Rust,anchor=west,inner sep=1pt] at ([xshift=1.5mm]x2) {运行令牌不能访问统一 API};
+\end{tikzpicture}%
+}
+\caption[两种令牌的接口隔离]{两种令牌各走各的路：交叉使用一律被拒绝}
+\label{fig:tokens}
+\end{figure}
+
+这个设计把“管理平台的权限”和“代表一次执行去行动的权限”在结构上隔开。容器里的代码即使拿到了自己的运行令牌，也不能用它去调管理接口修改授权；反过来，管理员的令牌也不能冒充某次执行去调工具。任何一类令牌泄露，都不会直接换来另一侧的能力。
+
+\subsection{“代表用户”必须可验证}
+
+当业务系统替某个用户发起调用时，它要告诉平台“我代表用户 U”。这个声明如果只是请求里的一个字符串，那么任何业务系统都可以冒充任何用户，前面的权限交集和审计归因就全部失去意义。所以本方案要求：“代表谁”必须是由企业身份提供方签发、经平台验签的令牌，或者是平台自己做令牌交换得到的凭证。请求头里的裸用户 ID 不能进入身份链。
+
+\subsection{工具的风险分级}
+
+工具网关维护一份四级风险字典：读取内部数据、写入内部数据、对外发送、高风险写操作。分级有两个直接用途：问答型 Agent 默认不能获得对外发送类工具；同时持有“读取敏感数据”和“对外发送”两类授权的 Agent，授权时需要两人签核，审计中对这种组合打标记。这是对前面提到的“困惑代理”风险的降低手段。
+
+\subsection{凭证保险库}
+
+工具需要的密钥（API 密钥、账号口令等）统一存放在凭证保险库里。保险库有三条铁律：
+
+\begin{enumerate}
+  \item 人只能写入、轮换和吊销凭证，不能读出明文；
+  \item 明文读取路径只对工具网关的服务身份开放，保险库在网络上也只有工具网关可达；
+  \item 密钥永远不进入模型的上下文，也不出现在工具的返回值、日志和快照里。
+\end{enumerate}
+
+图~\ref{fig:credential} 展示一次工具调用中凭证的流转：Agent 声明要调用某个工具，工具网关校验权限后从保险库短时取出凭证，代替 Agent 去调用目标系统，再把结果返回给 Agent。Agent 从头到尾看到的只是工具的名字和结果。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  box/.style={rounded corners=3pt,minimum width=2.7cm,minimum height=11mm,align=center,line width=.7pt,text width=2.5cm},
+  arrow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted},
+  stepbadge/.style={circle,draw=Primary,fill=white,minimum size=4.8mm,inner sep=0pt,
+                    font=\sffamily\bfseries\tiny,text=PrimaryDark,line width=.65pt}
+]
+  \node[box,draw=Gold,fill=GoldLight] (agent) {Agent 容器\\只有运行令牌};
+  \node[box,draw=Green,fill=GreenLight,right=9mm of agent] (gw) {工具网关\\校验权限、幂等、风险};
+  \node[box,draw=Primary,fill=PrimaryLight,above right=9mm and 9mm of gw] (vault) {凭证保险库\\人不可读};
+  \node[box,draw=Rust,fill=RustLight,below right=9mm and 9mm of gw] (target) {目标系统\\（外部或内部）};
+  \node[box,draw=Gold,fill=GoldLight,right=42mm of gw] (ledger) {事件账本\\权威的工具调用记录};
+
+  \draw[arrow] (agent) -- node[stepbadge,above=0.5mm]{1} (gw);
+  \draw[arrow] (gw) -- node[stepbadge,pos=.5]{2} (vault);
+  \draw[arrow] (gw) -- node[stepbadge,pos=.5]{3} (target);
+  \draw[arrow] (gw) -- node[stepbadge,pos=.5]{4} (ledger);
+  \draw[arrow] (gw.south) -- ++(0,-7mm) -| node[stepbadge,pos=.25]{5} (agent.south);
+\end{tikzpicture}%
+}
+\par\smallskip
+{\scriptsize\color{Muted}
+  \textbf{1} 声明工具调用\quad
+  \textbf{2} 短时取用凭证\quad
+  \textbf{3} 代为调用目标系统\quad
+  \textbf{4} 记录权威事件\quad
+  \textbf{5} 只把结果返回给 Agent\par}
+\caption[一次工具调用中凭证的流转]{一次工具调用中凭证的流转：凭证只在工具网关短时出现，从不进入容器}
+\label{fig:credential}
+\end{figure}
+
+% =============================================================================
+\section{公共服务层：副作用的统一出口}
+\label{sec:shared}
+
+\subsection{为什么需要统一出口}
+
+Agent 对外部世界的一切影响，都发生在三类动作里：调用模型、调用工具、执行代码。如果这三类动作可以从容器里直接发出，那么平台既不知道它们发生了，也无法阻止它们。公共服务层的作用，就是让这三类动作各自只有一条路可走，并且这条路上有平台的检查、记录和拒绝能力。这一层与入口层方向相反：入口层是外部调用平台，公共服务层是运行中的 Agent 反过来调用企业能力。
+
+图~\ref{fig:zoom-shared} 是全景图里的公共服务层：四个模块，两个复用企业已建的网关，两个自研。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm]
+\node[open,text width=2.6cm,minimum height=10mm] (ag) {运行中的 Agent\\{\scriptsize 只持有运行令牌}};
+\node[reuse,zoom,below left=8mm and 2.7cm of ag.south] (s1) {\zc{模型网关}{白名单、预算、计量、数据分级、黑名单}};
+\node[reuse,zoom,right=of s1] (s2) {\zc{工具网关}{权限交集、幂等台账、权威事件、风险分级}};
+\node[own,zoom,right=of s2] (s3) {\zc{凭证保险库}{人不可读；只有工具网关短时取用}};
+\node[own,zoom,right=of s3] (s4) {\zc{沙箱服务}{懒创建、复用、用完即毁、出网收敛}};
+\draw[aflow] (ag.south) -- (s1.north);
+\draw[aflow] (ag.south) -- (s2.north);
+\draw[aflow] (s2.north east) -- (s3.north west);
+\draw[aflow] (s2.south east) -- (s4.south west);
+\begin{scope}[on background layer]\node[band,draw=Primary!55!white,fit=(s1)(s4)] {};\end{scope}
+\end{tikzpicture}
+\caption[公共服务层的四个模块]{公共服务层的四个模块：Agent 只直接接触两个网关，凭证保险库和沙箱服务由工具网关代为调用（全景图中的公共服务层区域）}
+\label{fig:zoom-shared}
+\end{figure}
+
+\subsection{模型网关}
+
+模型网关是全部大模型调用的唯一出口。它负责：模型白名单、用量预算（超限即预算超限终态）、逐调用计量、多模型路由、数据分级到模型白名单的映射（涉及敏感数据的租户只能使用指定的模型域）、以及 Agent 黑名单（三道停机闸门的第二道）。第一阶段至少提供一条全局的数据分级默认规则，更细粒度的内容防泄露在第二阶段演进。云厂商自带的模型网关不进入权威链路——原因是它握着“能不能用某个模型”的决定权，也托管着模型密钥。
+
+\subsection{工具网关}
+
+工具网关是全部工具调用的唯一出口，也是权威工具调用事件的来源。本文用“工具网关”作为统一称呼；部分接口沿用了 Tool Hub 这个名字（例如环境变量 \code{TOOL_HUB_URL}），只作为兼容别名保留。
+
+工具分四类，只有最后一类需要沙箱：
+
+\begin{enumerate}
+  \item \textbf{技能说明。}以文本形式装进 Agent 上下文的能力描述，不涉及外部调用。
+  \item \textbf{API 工具。}直接调用某个目标业务服务。
+  \item \textbf{MCP 工具。}由独立的工具服务容器提供，通过模型上下文协议接入。
+  \item \textbf{环境交互工具。}执行代码、运行命令、操作浏览器或桌面。这类工具需要一个隔离的临时环境。
+\end{enumerate}
+
+环境交互工具的调用链路如图~\ref{fig:tool-chain}：Agent 请求工具网关，网关请求平台的沙箱服务，沙箱服务通过云适配层向供应商申请一个隔离环境。平台内部的组件之间也走平台自己的抽象层，不直接穿透到供应商。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  box/.style={rounded corners=3pt,minimum width=2.6cm,minimum height=10mm,align=center,line width=.7pt,text width=2.4cm},
+  arrow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted}
+]
+  \node[box,draw=Gold,fill=GoldLight] (a) {Agent};
+  \node[box,draw=Green,fill=GreenLight,right=6mm of a] (b) {工具网关};
+  \node[box,draw=Primary,fill=PrimaryLight,right=6mm of b] (c) {平台沙箱服务\\懒创建／复用／即毁};
+  \node[box,draw=Primary,fill=PrimaryLight,right=6mm of c] (d) {云适配层};
+  \node[box,draw=Rust,fill=RustLight,right=6mm of d] (e) {供应商沙箱};
+  \draw[arrow] (a) -- (b);
+  \draw[arrow] (b) -- (c);
+  \draw[arrow] (c) -- (d);
+  \draw[arrow] (d) -- (e);
+\end{tikzpicture}%
+}
+\caption[环境交互类工具的调用链路]{环境交互类工具的调用链路：平台内部组件之间也走平台自己的抽象，不穿透供应商}
+\label{fig:tool-chain}
+\end{figure}
+
+第一阶段在企业已有工具网关上做的增量包括：四类工具的分流、向容器注入网关地址、幂等台账、Agent 黑名单和最小的风险字典。
+
+\subsection{沙箱服务}
+
+沙箱服务是平台自研的轻量组件，负责隔离环境的生命周期：需要时才创建、同一会话内复用、用完即销毁、出网收敛到受控出口。它通过独立的 \code{/v1/sandboxes} 接口开放，工具网关只是它的消费方之一，租户也可以直接申请沙箱执行代码。凭证不进入沙箱；沙箱里的代码需要访问受保护资源时，仍然通过工具网关代为调用。
+
+\subsection{信任边界声明}
+
+容器里的 SDK、自主型的垫片、Agent 自己上报的事件，都不是信任根。安全边界由企业的网关、受控的网络出口、短时身份、沙箱隔离和企业侧的账本共同构成。
+
+% =============================================================================
+\section{统一账本、计量与可观测性}
+\label{sec:ledger}
+
+\subsection{账本是什么}
+
+统一账本是企业自己持有的、只追加的事件记录。Agent 的每一次执行、每一次工具调用、每一次策略判定、每一次管理操作，都以带序号和身份链的事件形式记入。它同时服务三个消费方：用户界面从中读取事件流，审计从中回放责任链，计量从中计算成本。三方消费的是同一份数据，所以它们之间不会出现不一致。
+
+\subsection{三类事实各有权威来源}
+
+同一份事件流可以被多方消费，但不同的用量数据必须尊重各自的权威来源（表~\ref{tab:facts}）。这个原则的核心是：容器自己上报的数据只能作为补充，不能作为计费和审计的依据。
+
+\begin{table}[htbp]
+\centering
+\caption{各类事实的权威来源}
+\label{tab:facts}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.0cm}L{4.2cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{事实} & \textbf{权威来源} & \textbf{原因}\\
+  \midrule
+  模型用量 & 模型网关 & 掌握真实的请求与响应计量\\
+  工具调用与副作用 & 工具网关 & 处于授权、幂等和外部调用的出口\\
+  运行时忙时 & 供应商账单 & 决定企业实际支付的金额\\
+  沙箱时长 & 平台沙箱服务加供应商 & 平台掌握申请语义，供应商掌握资源账单\\
+  容器自报 & 仅作补充 & 容器不是可信的计量与审计来源\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{计量三本账}
+
+计量分三本账（图~\ref{fig:three-books}）：内部分摊账回答哪个租户、哪个 Agent、哪次执行应承担多少成本；供应商账是企业实际付给模型、云和工具供应商的钱；核对账解释两者之间的差异、未能分摊的成本和估算误差。三本账都从同一份事件流算出。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.82\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  src/.style={rounded corners=3pt,draw=Green,fill=GreenLight,minimum width=2.6cm,minimum height=9mm,align=center,line width=.7pt},
+  book/.style={rounded corners=3pt,minimum width=3.4cm,minimum height=12mm,align=center,line width=.8pt,text width=3.1cm},
+  arrow/.style={-{Stealth[length=2mm]},line width=.75pt,color=Muted}
+]
+  \node[src] (m) {模型网关计量};
+  \node[src,below=3mm of m] (t) {工具网关台账};
+  \node[src,below=3mm of t] (r) {供应商账单};
+  \node[src,below=3mm of r] (s) {沙箱服务记录};
+  \node[rounded corners=3pt,draw=Gold,fill=GoldLight,minimum height=48mm,minimum width=2.8cm,align=center,line width=.8pt,right=12mm of t.south east,anchor=west,yshift=1.5mm] (ledger) {统一\\事件账本};
+  \node[book,draw=Primary,fill=PrimaryLight,right=12mm of ledger.east,yshift=16mm] (b1) {\textbf{内部分摊账}\\租户／Agent／执行各承担多少};
+  \node[book,draw=Rust,fill=RustLight,right=12mm of ledger.east] (b2) {\textbf{供应商账}\\企业实际支付的费用};
+  \node[book,draw=Gold,fill=GoldLight,right=12mm of ledger.east,yshift=-16mm] (b3) {\textbf{核对账}\\解释差异、未分摊与误差};
+  \draw[arrow] (m.east) -- (ledger.west |- m.east);
+  \draw[arrow] (t.east) -- (ledger.west |- t.east);
+  \draw[arrow] (r.east) -- (ledger.west |- r.east);
+  \draw[arrow] (s.east) -- (ledger.west |- s.east);
+  \draw[arrow] (ledger.east) -- (b1.west);
+  \draw[arrow] (ledger.east) -- (b2.west);
+  \draw[arrow] (ledger.east) -- (b3.west);
+\end{tikzpicture}%
+}
+\caption[计量三本账]{计量三本账：都从同一份事件流算出，互相可以核对}
+\label{fig:three-books}
+\end{figure}
+
+两条实现要求。第一，熔断的金额上限和计量的估算必须使用同一个计数器，否则会出现“预算系统认为没超限、任务引擎却还在跑”的分裂。第二，对账的粒度取决于供应商：如果供应商账单支持按会话或实例打标签，就能按执行对账；如果不支持，只能到租户级，文档必须如实说明，不能夸大。
+
+问答型共享池的成本，按各租户的活跃时长占比分摊：
+
+\[
+  C_{\text{租户，共享池}}
+  =
+  C_{\text{共享池，忙时}}
+  \times
+  \frac{T_{\text{租户，活跃}}}{\sum_i T_{i\text{，活跃}}}
+\]
+
+一次执行的完整成本包含七个维度：
+
+\[
+  C_{\text{执行}}
+  = C_{\text{模型}}
+  + C_{\text{工具}}
+  + C_{\text{运行时}}
+  + C_{\text{沙箱}}
+  + C_{\text{存储}}
+  + C_{\text{网络}}
+  + C_{\text{平台}}
+\]
+
+\subsection{运营指标}
+
+作为参考架构，本文不预设未经实测的成功率、延迟或可用性目标。实施之后至少应同时测量六项指标：成功完成的生产执行数、单次执行成本、策略拒绝率、审计事件完整率、人工接管率、供应商账单差异。正式的服务等级目标应在容量压测、故障演练和供应商能力验证之后，按业务等级确定。单独看“接入了多少 Agent”或“调用了多少次”容易掩盖失败、越权和浪费。
+
+\subsection{观测的三层}
+
+可观测性分三层，每层的建设方式不同：
+
+\begin{enumerate}
+  \item \textbf{埋点。}平台代码统一采用 OpenTelemetry 开放标准，每个工具调用对应一个追踪片段，链路追踪标识全程传播。埋点在企业自己的代码里，一次装好。
+  \item \textbf{收集。}容器的标准输出和错误输出先进入平台的收集器，脱敏后再发送到观测后端；供应商原生的日志留存设为最短或关闭。这条规则防的是提示词和用户数据以日志形式留在供应商侧。
+  \item \textbf{面板。}第一阶段可以租用云厂商的观测后端，因为埋点走的是开放标准，换一家只改数据地址；但租户只能通过平台查看自己的追踪，不直接打开供应商面板。
+\end{enumerate}
+
+默认的追踪属性使用白名单：提示词、模型输出和工具的敏感参数不进入面板。监控回答的是“机器是否健康”，账本回答的是“谁做了什么”；责任追溯永远以企业账本为准。
+
+\subsection{防篡改与合规删除}
+
+账本只追加，每条事件包含前一条事件的哈希值，形成哈希链；每日的链摘要锚定到带版本锁定或一次写入不可改的存储介质。修改任何一条历史事件都会导致链校验失败，这是审计可以信赖账本的技术基础。
+
+合规删除（例如用户行使删除权）与只追加账本看起来矛盾，解决方式是按对话线程加密：每个线程的事件正文用独立密钥加密，需要删除时销毁密钥，正文即不可读，而事件的顺序、类型和审计结构保持完整。
+
+% =============================================================================
+\section{权威存储底座}
+\label{sec:storage}
+
+\subsection{逻辑上一个库，语义先行}
+
+第一阶段用一个逻辑上的 PostgreSQL 承载事件账本、检查点、注册表和对话线程与执行环境的映射。这样做是为了先把统一的数据语义冻结下来，而不是把所有负载永久塞进一个数据库。将来把事件流拆到消息队列、把分析拆到列式存储、把检查点拆到专用存储时，上层的契约都不需要改变。
+
+图~\ref{fig:zoom-storage} 是这个逻辑单库承载的四类数据。它们的共同点是“权威”：任何模块要回答“真实发生了什么”，都以这里为准。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm]
+\node[open,zoom] (g1) {\zc{事件账本}{平台分配序号；只追加；哈希链}};
+\node[open,zoom,right=of g1] (g2) {\zc{检查点}{执行的恢复点；带过期时间}};
+\node[open,zoom,right=of g2] (g3) {\zc{注册表}{Agent、版本、能力声明、授权}};
+\node[open,zoom,right=of g3] (g4) {\zc{会话映射}{对话线程与执行环境的对应}};
+\node[bandnote,below=2.5mm of g1.south west,anchor=north west] (gn) {逻辑上一个 PostgreSQL：主备、静态加密、按时间点恢复、异地备份；日后拆分为专用存储不改上层契约};
+\begin{scope}[on background layer]\node[band,fit=(g1)(g4)(gn)] {};\end{scope}
+\end{tikzpicture}
+\caption[权威存储底座的四类数据]{权威存储底座承载的四类数据（全景图中的存储底座区域）}
+\label{fig:zoom-storage}
+\end{figure}
+
+\subsection{容量与写入量治理}
+
+输出片段（\code{message.delta}）是最主要的写入量放大来源。做一个粗略估算：高峰每小时 2,000 次对话，每次约 100 个片段，就是每小时 20 万行，30 天接近 1.5 亿行；再加上长任务每一步几百 KB 的检查点，单个数据库会先被容量而不是性能拖垮。所以第一阶段就要采用：
+
+\begin{itemize}
+  \item 输出片段进入短期保留的流表，默认保留 7 天；
+  \item 执行完成后把片段合并成长期保留的消息事件；
+  \item 检查点默认保留 7 天，执行完成后缩短到 24 小时；
+  \item 大对象通过对象存储引用，不在数据库里内联；
+  \item 数据库采用主备、静态加密、按时间点恢复和异地每日备份。
+\end{itemize}
+
+数据恢复目标必须在容量压测、备份恢复、区域故障和供应商失联演练之后再确定。本文不预填未经验证的恢复点和恢复时间目标。
+
+% =============================================================================
+\section{执行平面与云供应商边界}
+\label{sec:execplane}
+
+这一节对应全景图里最下面的两层（图~\ref{fig:zoom-exec}）：执行平面里的壳和适配层是平台的，两条产品线上的机器是租的；再往下的云端资源全部按量租用。这两层之间有一条分界线——供应商的名字只出现在最底层，执行平面里没有任何模块直接依赖某一家供应商。
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=2.2mm]
+\node[own,zoom] (x1) {\zc{云适配层}{五个基本操作；供应商方言在此抽象}};
+\node[own,zoom,right=of x1] (x2) {\zc{多云调度层}{能力矩阵、小流量试探、跨云重放}};
+\node[bandtitle,text=RustDark,below=4mm of x1.south west,anchor=north west] (tR) {Runtime 产品线 · 托管运行 · 按忙闲计费};
+\node[own,text width=2.75cm,minimum height=11mm,below=1.5mm of tR.south west,anchor=north west] (r1) {\zc{T0 运行壳池}{共享、无状态}};
+\node[own,text width=2.75cm,minimum height=11mm,right=of r1] (r2) {\zc{T2 SDK 壳}{独占容器}};
+\node[own,text width=2.75cm,minimum height=11mm,right=of r2] (r3) {\zc{T1 流程执行器}{声明式流程图}};
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tR)(r1)(r3)] (BR) {};\end{scope}
+\node[bandtitle,text=RustDark,anchor=north west] (tS) at ($(BR.north east |- tR.north west)+(3mm,0)$) {Sandbox 产品线 · 临时隔离计算};
+\node[rent,text width=2.75cm,minimum height=11mm,below=1.5mm of tS.south west,anchor=north west] (b1) {\zc{工具级沙箱执行}{用完即毁}};
+\node[own,text width=2.75cm,minimum height=11mm,right=of b1] (b2) {\zc{T3 整机环境}{整机隔离 + 垫片}};
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tS)(b1)(b2)] (BS) {};\end{scope}
+\begin{pgfonlayer}{deep}\node[frame,draw=Rust,fill=Rust!4,fit=(x1)(x2)(BR)(BS)] (FX) {};\end{pgfonlayer}
+\node[bandtitle,text=RustDark,anchor=north west] (tY) at ([yshift=-4mm]FX.south west) {云端资源 · 按量租用，随时可换};
+\node[rent,text width=2.75cm,minimum height=11mm,below=1.5mm of tY.south west,anchor=north west] (y1) {\zc{云 A · 运行时}{伸缩、忙闲计费、会话保持}};
+\node[rent,text width=2.75cm,minimum height=11mm,right=of y1] (y2) {\zc{云 A · 沙箱}{隔离微型虚拟机}};
+\node[rent,text width=2.75cm,minimum height=11mm,right=of y2] (y3) {\zc{观测面板}{开放标准的后端}};
+\node[rent,text width=2.75cm,minimum height=11mm,right=of y3] (y4) {\zc{对象存储}{文件与产物仓库}};
+\node[rent,text width=2.75cm,minimum height=11mm,right=of y4] (y5) {\zc{云 B · 备用}{多云容灾}};
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tY)(y1)(y5)] {};\end{scope}
+\end{tikzpicture}%
+}
+\caption[执行平面与云端资源]{执行平面与云端资源（全景图中最下面的两层）}
+\label{fig:zoom-exec}
+\end{figure}
+
+\subsection{云适配层：五个基本操作}
+
+平台只通过五个基本操作使用云资源：部署、调用、取消、查询、销毁。平台的其他部分不直接依赖任何具体供应商。这五个操作的接口形状就是多云的预留：换供应商时，只需要实现一个新的适配器。
+
+有三项能力虽然由供应商的运行时提供，也必须被适配层抽象掉：会话保持、版本切流、忙闲上报。它们是供应商各自的“方言”，不同供应商的语义并不相同，让它们穿透到任务引擎会在换供应商时造成隐性返工。
+
+\subsection{存活探测与忙闲的权威判断}
+
+容器的 \code{/ping} 只代表“还活着”。忙闲的权威判断来自任务引擎：这个执行环境上有没有未结束的执行。云适配层据此向供应商上报忙闲。这样设计有两个目的：防止容器通过虚报“忙”让供应商永不回收（空转计费），或虚报“闲”让供应商回收掉正在执行的实例；同时保证如实上报空闲，这是供应商按忙闲计费能真正省钱的前提。能力声明里的最长运行时长由平台的计时器强制：到期先发取消，宽限期后直接销毁，不依赖容器配合。
+
+\subsection{两条产品线}
+
+执行平面只有两条租用的产品线（表~\ref{tab:lines}）。供应商的名字只作为租用来源标注，不作为执行平面的组件。
+
+\begin{table}[htbp]
+\centering
+\caption{执行平面的两条产品线}
+\label{tab:lines}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.6cm}L{5.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{产品线} & \textbf{承载内容} & \textbf{计费与隔离}\\
+  \midrule
+  运行时 Runtime & 问答型运行壳池、代码型 SDK 壳、流程执行器 & 托管持续运行，按忙闲计费\\
+  沙箱 Sandbox & 工具级的代码与浏览器执行、自主型整机环境 & 临时计算，按次或按时使用，用完即毁\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{供应商能力的三档取舍}
+
+用第~\ref{sec:method} 节的三条判据（不握决定权、不托管权威数据、有标准出口）衡量供应商的全套产品，结论分三档（表~\ref{tab:vendor}）。
+
+\begin{table}[htbp]
+\centering
+\caption{供应商组件的三档取舍}
+\label{tab:vendor}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.6cm}L{5.6cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{结论} & \textbf{组件} & \textbf{理由}\\
+  \midrule
+  使用 & 运行时、沙箱、对象存储、只读的观测面板 & 提供机械资源，不握最终决定权；观测采用开放标准，可替换\\
+  不使用 & 云上的模型网关与工具网关、凭证托管、身份服务、知识库、记忆服务、低代码平台、托管护栏 & 握有决定权、托管密钥或权威数据，形成深度锁定\\
+  备选 & 第二家的运行时、专项沙箱产品 & 通过适配器和能力矩阵接入，不改变上层契约\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{采购的一票否决项}
+
+供应商验证至少覆盖六项：实例级或网络级的出网收敛、会话亲和、虚拟机快照、账单标签的粒度、原生日志能否关闭或缩短留存、忙闲语义能否与平台的判断对齐。任何一项影响十条不变量或退出能力时，应作为采购的否决条件，而不是上线后的工程补丁。
+
+\subsection{多云不是双倍部署}
+
+第二阶段的多云调度层负责能力矩阵、小流量试探、熔断改道与跨云重放。规则是“一次执行环境在生命周期内固定在一家供应商”，避免跨云共享内存状态；容灾依赖企业自持的检查点、产物和账本——在另一家云重新创建执行环境并从存档重放，而不是维持昂贵的热双活。

@@ -1,0 +1,1020 @@
+% =============================================================================
+\whitepaperpart{II}{Architecture and Runtime Contract}
+{From the control boundary into engineering: the six-layer architecture, the four-axis manifest, the three interface layers, runtime state, and how each kind of agent fulfills the contract.}
+
+% =============================================================================
+\section{Overall Architecture}
+\label{sec:overview}
+
+The architecture rests on one asymmetry: the control plane is owned by the enterprise and never leaves it; the execution plane is rented and can be replaced. This section shows the layers, the partitions inside the control plane, and every module in one picture.
+
+\subsection{The six-layer view}
+
+From the people who use it down to the cloud resources it runs on, the platform has six layers (Figure~\ref{fig:overview}). Three lines matter when reading the figure: enterprise systems are not submodules of the platform but are reused through explicit interfaces; the platform's own control plane is one whole, owned by the enterprise; and a stable contract separates the control plane from cloud execution resources, so everything below the contract can be swapped.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\scriptsize,
+  nodebox/.style={draw=Primary,fill=PrimaryLight,rounded corners=2pt,
+                  minimum height=8mm,text width=2.9cm,align=center,line width=.6pt},
+  built/.style={nodebox,draw=Green,fill=GreenLight},
+  oss/.style={nodebox,draw=Gold,fill=GoldLight},
+  rentbox/.style={nodebox,draw=Rust,fill=RustLight},
+  neutralbox/.style={nodebox,draw=Rule,fill=SoftGray},
+  layerband/.style={draw=Rule,rounded corners=4pt,inner sep=5pt},
+  ownband/.style={layerband,draw=Primary},
+  execband/.style={layerband,draw=Rust},
+  label/.style={font=\bfseries\sffamily\small\color{Ink},anchor=east,text width=2.6cm,align=right},
+  arrow/.style={-{Stealth[length=1.8mm]},line width=.65pt,color=Muted}
+]
+  \node[neutralbox] (business) {Business systems /\\end users};
+  \node[neutralbox,right=2mm of business] (developer) {Developers / CI};
+  \node[neutralbox,right=2mm of developer] (operator) {Operations / audit / risk};
+  \node[layerband,fit=(business)(developer)(operator)] (users) {};
+  \node[label,left=3mm of users] {Users};
+
+  \node[built,below=6mm of business] (idp) {Identity provider\\(SSO / IdP)};
+  \node[built,right=2mm of idp] (gateways) {Model gateway /\\tool gateway};
+  \node[built,right=2mm of gateways] (enterprise) {CI, finance,\\event bus};
+  \node[layerband,draw=Green,fit=(idp)(gateways)(enterprise)] (entsys) {};
+  \node[label,left=3mm of entsys] {Enterprise systems};
+
+  \node[nodebox,below=6mm of idp] (entry) {Entry layer\\console / API / SDK};
+  \node[nodebox,right=2mm of entry] (control) {Governance layer\\registry / policy / IAM / triggers};
+  \node[nodebox,right=2mm of control] (data) {Runtime services\\tasks / sessions / metering / artifacts};
+  \node[nodebox,right=2mm of data] (shared) {Shared services\\models / tools / credentials / sandbox};
+  \node[oss,below=3mm of control,xshift=1.55cm,text width=6.2cm] (store)
+       {Authoritative store: event ledger / checkpoints / registry / session map};
+  \node[ownband,fit=(entry)(control)(data)(shared)(store)] (platform) {};
+  \node[label,left=3mm of platform] {Enterprise control plane};
+
+  \node[draw=Muted,dashed,fill=white,rounded corners=2pt,below=6mm of store,
+        minimum height=8mm,text width=10.4cm,align=center] (l2)
+       {L2 contract: 3 endpoints + 6 events + 4 environment variables + four-axis manifest + run token + three-stage kill switch};
+  \node[label,left=3mm of l2] {Stable contract};
+
+  \node[nodebox,below=6mm of l2,xshift=-3.1cm] (adapter) {Cloud adapter\\five primitives};
+  \node[nodebox,right=2mm of adapter] (runtime) {Runtime line\\T0 / T2 / T1};
+  \node[nodebox,right=2mm of runtime] (sandbox) {Sandbox line\\tool sandbox / T3};
+  \node[execband,fit=(adapter)(runtime)(sandbox)] (exec) {};
+  \node[label,left=3mm of exec] {Execution plane};
+
+  \node[rentbox,below=6mm of adapter] (cloudr) {Cloud A runtime};
+  \node[rentbox,right=2mm of cloudr] (clouds) {Cloud A sandbox};
+  \node[rentbox,right=2mm of clouds] (object) {Dashboards /\\object storage};
+  \node[rentbox,right=2mm of object,dashed] (cloudb) {Cloud B (Phase~2)};
+  \node[execband,fit=(cloudr)(clouds)(object)(cloudb)] (cloud) {};
+  \node[label,left=3mm of cloud] {Cloud resources};
+
+  \draw[arrow] (users) -- (entsys);
+  \draw[arrow] (entsys) -- (platform);
+  \draw[arrow] (platform) -- (l2);
+  \draw[arrow] (l2) -- (exec);
+  \draw[arrow] (exec) -- (cloud);
+\end{tikzpicture}%
+}
+\caption[The six-layer boundary]{The six-layer boundary of the platform. Blue: enterprise-owned platform modules; green: reused enterprise systems; yellow: open standards; orange: rented cloud resources}
+\label{fig:overview}
+\end{figure}
+
+Layer by layer, from the top:
+
+\begin{description}
+  \item[Users] Four roles, each with its own entrance: business systems call agents through the unified API; end users reach agents through business front ends; developers onboard, build and release through the SDK and command line; operations, audit and risk staff inspect, suspend and replay through the admin console.
+  \item[Enterprise systems] The identity provider, the model gateway, the tool gateway, CI, finance systems and the event bus. The platform does not rebuild any of them; it integrates through standard interfaces (Section~\ref{sec:integration}).
+  \item[Enterprise control plane] All of the platform's own logic, in five partitions (next subsection). This layer is where control lives, and the enterprise owns it.
+  \item[Stable contract] The agreement between the platform and every agent container. It is frozen on day one and only ever extended, so that everything below it can be replaced freely and nothing above it needs rework.
+  \item[Execution plane] Where agents actually run. The cloud adapter translates platform instructions into vendor APIs; two product lines host long-running agents and ephemeral isolated computation respectively. The shells and the adapter belong to the platform; the machines are rented.
+  \item[Cloud resources] Rented machines, sandboxes, storage and dashboards. Vendor names appear only in this layer.
+\end{description}
+
+\subsection{The five partitions of the control plane}
+
+Modules inside the control plane are grouped into five partitions, each with an explicit criterion (Table~\ref{tab:partitions}) that tells any new module where it belongs.
+
+\begin{table}[htbp]
+\centering
+\caption{The five partitions of the control plane and their criteria}
+\label{tab:partitions}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.0cm}L{5.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Partition} & \textbf{Criterion} & \textbf{Core modules}\\
+  \midrule
+  Entry layer & The entrances through which people, CI and business systems reach the platform & Admin console, unified API (L1), SDK and CLI\\
+  Governance layer & Low-frequency governance: what may run, who may do what, when it is woken & Registry and release, policy and authorization, agent IAM, scheduled and event triggers, approval console\\
+  Runtime services & The high-frequency path every run passes through & Task engine, session service, metering and reconciliation, files and artifacts, observability, interrupt and resume\\
+  Shared services & The exits that agents running in the cloud must pass to reach enterprise capabilities & Model gateway, tool gateway, credential vault, sandbox service\\
+  Authoritative store & The enterprise-side source of truth for all control and runtime facts & PostgreSQL event ledger, checkpoints, registry, session map and hash chain\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+Two points deserve explanation. First, why the entry layer and the shared-services layer are kept apart: traffic in the entry layer flows \emph{in} (people and business systems calling the platform); traffic in the shared-services layer flows \emph{back} from the cloud (running agents calling models and tools). Opposite directions, different callers, different authentication---mixing them would let one set of governance rules contaminate the other. Second, why the authoritative store is its own layer: it is not a module's private database but the source of truth every module depends on, and drawing it separately states plainly that this data must be in the enterprise's hands.
+
+\subsection{The complete architecture}
+
+Figure~\ref{fig:panorama} draws every module on one page. It shows the target architecture in full, without distinguishing delivery phases (phase scope is in Section~\ref{sec:mvp}); color indicates the build method. Read it from top to bottom: users enter through the entry layer; existing enterprise systems are reused around the platform; the platform's own control plane has five partitions; one stable container contract separates the control plane from the execution plane; in the execution plane the shells are the platform's and the machines are rented; vendor names appear only in the bottom layer. Later sections zoom into each region: the entry layer in Figure~\ref{fig:zoom-entry}, the governance layer in Figure~\ref{fig:zoom-control}, runtime services in Figure~\ref{fig:zoom-data}, shared services in Figure~\ref{fig:zoom-shared}, the authoritative store in Figure~\ref{fig:zoom-storage}, the execution plane and cloud resources in Figure~\ref{fig:zoom-exec}, and enterprise systems in Figure~\ref{fig:zoom-ent}.
+
+\begin{figure}[p]
+\centering
+\resizebox{0.93\textwidth}{!}{%
+\begin{tikzpicture}[node distance=1.5mm]
+% ---------- users
+\node[bandtitle] (tU) at (3.5pt,0) {Users};
+\node[neutral,below=1.5mm of tU.south west,anchor=north west] (u1) {Business systems};
+\node[neutral,right=of u1] (u2) {End users};
+\node[neutral,right=of u2] (u3) {Developers · CI};
+\node[neutral,right=of u3] (u4) {Operations · audit · risk};
+\begin{scope}[on background layer]\node[band,fit=(tU)(u1)(u4)] (BU) {};\end{scope}
+
+% ---------- enterprise systems
+\node[bandtitle,text=GreenDark,below=3.5mm of BU.south west,anchor=north west,xshift=3.5pt] (tE) {Enterprise systems · reused and integrated, not rebuilt};
+\node[reuse,below=1.5mm of tE.south west,anchor=north west] (e1) {Identity provider (SSO / IdP)};
+\node[reuse,right=of e1] (e2) {Model gateway (existing)};
+\node[reuse,right=of e2] (e3) {Tool gateway (existing)};
+\node[reuse,right=of e3] (e4) {CI and scanning};
+\node[reuse,below=of e1] (e5) {Finance and chargeback};
+\node[reuse,right=of e5] (e6) {Risk approval desk};
+\node[reuse,right=of e6] (e7) {Enterprise event bus};
+\node[reuse,right=of e7] (e8) {Enterprise object storage};
+\begin{scope}[on background layer]\node[band,draw=Green!60!white,fit=(tE)(e1)(e8)] (BE) {};\end{scope}
+
+% ---------- control plane
+\node[bandtitle,text=PrimaryDark,anchor=north west] (tC) at ([xshift=6pt,yshift=-5mm]BE.south west) {Platform · control plane (enterprise-owned)};
+% entry layer
+\node[bandtitle,below=2.5mm of tC.south west,anchor=north west,xshift=3.5pt] (t1) {Entry layer · where people and business systems come in};
+\node[own,text width=3.09cm,below=1.5mm of t1.south west,anchor=north west] (c1) {Admin console};
+\node[own,text width=3.09cm,right=of c1] (c2) {Unified API (L1)};
+\node[own,text width=3.09cm,right=of c2] (c3) {SDK and CLI};
+\coordinate (fitpt1) at ($(c1 -| e8.east)+(-6pt,0)$);
+\begin{scope}[on background layer]\node[band,fit=(t1)(c1)(c3)(fitpt1)] (B1) {};\end{scope}
+% governance layer
+\node[bandtitle,below=3mm of B1.south west,anchor=north west,xshift=3.5pt] (t2) {Governance layer · low-frequency: what may run, who may do what, when it is woken};
+\node[own,text width=3.09cm,below=1.5mm of t2.south west,anchor=north west] (k1) {Registry and release};
+\node[own,text width=3.09cm,right=of k1] (k2) {Policy and authorization};
+\node[own,text width=3.09cm,right=of k2] (k3) {Agent IAM};
+\node[own,text width=3.09cm,below=of k1] (k4) {Scheduled triggers};
+\node[own,text width=3.09cm,right=of k4] (k5) {Event triggers};
+\node[own,text width=3.09cm,right=of k5] (k6) {Approval console};
+\coordinate (fitpt2) at ($(k1 -| e8.east)+(-6pt,0)$);
+\begin{scope}[on background layer]\node[band,fit=(t2)(k1)(k6)(fitpt2)] (B2) {};\end{scope}
+% runtime services
+\node[bandtitle,below=3mm of B2.south west,anchor=north west,xshift=3.5pt] (t3) {Runtime services · high-frequency: every run passes through};
+\node[own,text width=3.09cm,below=1.5mm of t3.south west,anchor=north west] (d1) {Task engine};
+\node[own,text width=3.09cm,right=of d1] (d2) {Session service};
+\node[own,text width=3.09cm,right=of d2] (d3) {Metering and reconciliation};
+\node[own,text width=3.09cm,right=of d3] (d4) {Files and artifacts};
+\node[open,text width=3.09cm,below=of d1] (d5) {Observability};
+\node[own,text width=3.09cm,right=of d5] (d6) {Interrupt and resume};
+\node[own,text width=3.09cm,right=of d6] (d7) {Memory service};
+\coordinate (fitpt3) at ($(d1 -| e8.east)+(-6pt,0)$);
+\begin{scope}[on background layer]\node[band,fit=(t3)(d1)(d7)(fitpt3)] (B3) {};\end{scope}
+% shared services
+\node[bandtitle,below=3mm of B3.south west,anchor=north west,xshift=3.5pt] (t4) {Shared services · the single exits through which agents reach enterprise capabilities};
+\node[reuse,text width=3.09cm,below=1.5mm of t4.south west,anchor=north west] (s1) {Model gateway};
+\node[reuse,text width=3.09cm,right=of s1] (s2) {Tool gateway};
+\node[own,text width=3.09cm,right=of s2] (s3) {Credential vault};
+\node[own,text width=3.09cm,right=of s3] (s4) {Sandbox service};
+\coordinate (fitpt4) at ($(s1 -| e8.east)+(-6pt,0)$);
+\begin{scope}[on background layer]\node[band,draw=Primary!55!white,fit=(t4)(s1)(s4)(fitpt4)] (B4) {};\end{scope}
+% authoritative store
+\node[bandtitle,below=3mm of B4.south west,anchor=north west,xshift=3.5pt] (t5) {Authoritative store · the enterprise-side source of truth};
+\node[open,below=1.5mm of t5.south west,anchor=north west,text width=12.8cm] (st) {Unified ledger (PostgreSQL): event ledger · checkpoints · registry · session map · hash chain};
+\coordinate (fitpt5) at ($(st -| e8.east)+(-6pt,0)$);
+\begin{scope}[on background layer]\node[band,fit=(t5)(st)(fitpt5)] (B5) {};\end{scope}
+\begin{pgfonlayer}{deep}\node[frame,draw=Primary,fill=Primary!4,fit=(tC)(B1)(B2)(B3)(B4)(B5)] (FC) {};\end{pgfonlayer}
+
+% ---------- L2 boundary
+\node[draw=Muted,dashed,fill=white,rounded corners=2pt,minimum height=8mm,text width=13.0cm,align=center,
+      font=\sffamily\footnotesize,text=Ink,below=4mm of FC.south,anchor=north] (L2)
+  {Stable contract · L2: 3 endpoints · 6 events · 4 env.\ variables · four-axis manifest \,|\, run token \,|\, three-stage kill switch};
+
+% ---------- execution plane
+\node[bandtitle,text=RustDark,anchor=north west] (tX) at ($(L2.south -| FC.west)+(9.5pt,-4mm)$) {Platform · execution plane (shells and adapter built in-house, machines rented)};
+\node[own,below=1.5mm of tX.south west,anchor=north west,text width=2.25cm] (x1) {Cloud adapter};
+\node[own,right=of x1,text width=2.25cm] (x2) {Multi-cloud scheduler};
+\node[bandnote,right=3mm of x2,text width=8.0cm,align=left] (xn) {Five primitives: deploy · invoke · cancel · status · destroy. Session affinity, traffic switching and busy/idle reporting are abstracted here and never leak upward};
+\node[bandtitle,text=RustDark,below=3.5mm of x1.south west,anchor=north west] (tR) {Runtime line · managed execution · busy/idle billing};
+\node[own,below=1.5mm of tR.south west,anchor=north west,text width=2.25cm] (r1) {T0 harness pool};
+\node[own,right=of r1,text width=2.25cm] (r2) {T2 SDK shell};
+\node[own,right=of r2,text width=2.25cm] (r3) {T1 workflow executor};
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tR)(r1)(r3)] (BR) {};\end{scope}
+\node[bandtitle,text=RustDark,anchor=north west] (tS) at ($(BR.north east |- tR.north west)+(3mm,0)$) {Sandbox line · ephemeral isolated compute};
+\node[rent,below=1.5mm of tS.south west,anchor=north west,text width=2.25cm] (b1) {Tool-level sandbox};
+\node[own,right=of b1,text width=2.25cm] (b2) {T3 full VM + shim};
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tS)(b1)(b2)] (BS) {};\end{scope}
+\coordinate (fitpt7) at ($(x1 -| FC.east)+(-6pt,0)$);
+\begin{pgfonlayer}{deep}\node[frame,draw=Rust,fill=Rust!4,fit=(tX)(x1)(x2)(xn)(BR)(BS)(fitpt7)] (FX) {};\end{pgfonlayer}
+
+% ---------- cloud resources
+\node[bandtitle,text=RustDark,anchor=north west] (tY) at ($(FX.south west -| tE.west)+(0,-4mm)$) {Cloud resources · rented by usage; vendor names appear only here and can be replaced};
+\node[rent,below=1.5mm of tY.south west,anchor=north west,text width=2.48cm] (y1) {Cloud A · runtime};
+\node[rent,right=of y1,text width=2.48cm] (y2) {Cloud A · sandbox};
+\node[rent,right=of y2,text width=2.48cm] (y3) {Observability backend};
+\node[rent,right=of y3,text width=2.48cm] (y4) {Object storage};
+\node[rent,right=of y4,text width=2.48cm] (y5) {Cloud B · standby};
+\coordinate (fitpt6) at ($(y1 -| e8.east)+(0,0)$);
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tY)(y1)(y5)(fitpt6)] (BY) {};\end{scope}
+
+% ---------- legend
+\node[own,below=4mm of BY.south west,anchor=north west,text width=1.6cm,minimum height=6mm] (lg1) {Build};
+\node[reuse,right=of lg1,text width=1.6cm,minimum height=6mm] (lg2) {Reuse};
+\node[open,right=of lg2,text width=2.3cm,minimum height=6mm] (lg3) {Open standard};
+\node[rent,right=of lg3,text width=1.6cm,minimum height=6mm] (lg4) {Rent};
+\node[bandnote,right=3mm of lg4,text width=6.5cm,align=left] {Modules with a rented component (traffic switching inside registry and release, session affinity inside the session service) keep their logic in-house and rent only the mechanics; they are colored by their main part.};
+\end{tikzpicture}%
+}
+\caption[Complete architecture]{The complete architecture: four layers and every module, colored by build method (phases in Section~\ref{sec:mvp})}
+\label{fig:panorama}
+\end{figure}
+
+Table~\ref{tab:modules} gives a one-line responsibility and the build method for each module. Phase information appears only in this table and in Section~\ref{sec:mvp}; the architecture figures show the target as a whole.
+
+\begin{table}[htbp]
+\centering
+\caption{Module build matrix}
+\label{tab:modules}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.9cm}L{3.0cm}L{2.5cm}C{1.1cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Partition} & \textbf{Module} & \textbf{Method} & \textbf{Phase} & \textbf{Responsibility}\\
+  \midrule
+  Entry & Admin console & \tagself & 1 & Inspect, manage, replay, one-click suspend; every action goes to the ledger\\
+   & Unified API (L1) & \tagself & 1 & Threads, runs, events, files; streaming output and resumable reads\\
+   & SDK and CLI & \tagself{} + \tagrent & 1 & Onboarding with few changes, cloud build, release, conformance checks\\
+  Governance & Registry and release & \tagself{} + \tagrent & 1 & Immutable versions, canaries, traffic switching, rollback, suspension\\
+   & Policy and authorization & \tagself & 1 & Permission intersection, allow-lists, structural denials, tool risk tiers\\
+   & Agent IAM & \tagself & 1 & Principals, owners, identity chain, two token classes, delegation verification\\
+   & Triggers and approval & \tagself & 1--2 & Scheduled triggers first; event triggers and the approval console in Phase~2\\
+  Runtime & Task engine and sessions & \tagself{} + \tagrent & 1 & Run state machine, circuit breaker, retries, thread-to-session mapping\\
+   & Metering and reconciliation & \tagself & 1 & Internal allocation book, vendor book, reconciliation book\\
+   & Files and artifacts & \tagself{} + \tagrent & 1 & Reference management, presigned direct transfer, lifecycle\\
+   & Observability and recovery & \tagopen{} + \tagrent & 1--2 & OpenTelemetry instrumentation first; interrupt mechanics and memory in Phase~2\\
+  Shared & Gateways, vault, sandbox & \tagreuse{} + \tagself & 1 & Single exits for side effects, credential injection, isolated execution\\
+  Store & Unified ledger & \tagopen & 1 & Events, checkpoints, registry, mapping; point-in-time recovery\\
+  Execution & Cloud adapter, T0, T2 & \tagself & 1 & Five primitives, harness pool, code-agent SDK shell\\
+   & T1, T3, multi-cloud & \tagself & 2--3 & Workflow executor, autonomous-agent shim, cross-cloud replay\\
+  Cloud & Runtime, sandbox, storage & \tagrent & 1 & Elastic machines, isolated environments, dashboards and object storage\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{The vendor boundary rule}
+
+Vendor names may appear only in the cloud-resources layer. Wherever the control plane or the execution plane needs a vendor SDK, it must be wrapped by the cloud adapter and must not reach the task engine, identity, metering or the public API. The value of this rule is that switching vendors is confined to a single module.
+
+% =============================================================================
+\section{Capability Manifest and Admission}
+\label{sec:profile}
+
+This section corresponds to the governance layer in the complete architecture. Its modules are the low-frequency governance actions (Figure~\ref{fig:zoom-control}): registry and release decide \emph{what may run}; policy, authorization and agent IAM decide \emph{who may do what}; scheduled and event triggers decide \emph{when an agent is woken}; the approval console handles high-risk operations that need a person. Together they answer one question---on what grounds is an agent allowed to run?---and the answer is the capability manifest and the admission rules of this section.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm,zoom/.append style={minimum height=18mm}]
+\node[own,zoom] (k1) {\zc{Registry and release}{Immutable versions, canaries, traffic switching, rollback; suspension by draining}};
+\node[own,zoom,right=of k1] (k2) {\zc{Policy and authorization}{Permission intersection, risk tiers, structural denials}};
+\node[own,zoom,right=of k2] (k3) {\zc{Agent IAM}{Four principal types, identity chain, two token classes, delegation verification}};
+\node[own,zoom,below=of k1] (k4) {\zc{Scheduled triggers}{Create one run at the appointed time, on the same path}};
+\node[own,zoom,right=of k4] (k5) {\zc{Event triggers}{A business event creates one run}};
+\node[own,zoom,right=of k5] (k6) {\zc{Approval console}{Human approval of high-risk operations; decisions flow back}};
+\begin{scope}[on background layer]\node[band,fit=(k1)(k6)] {};\end{scope}
+\end{tikzpicture}
+\caption[The governance layer]{The six modules of the governance layer (the governance region of the complete architecture)}
+\label{fig:zoom-control}
+\end{figure}
+
+\subsection{Why not bind everything to the kind}
+
+Section~\ref{sec:agent-def} divided agents into four kinds by who decides the control flow. A natural next step would be to bind isolation level, side-effect scope and recovery capability to the kind as well: T0 means shared pool plus read-only, T2 means dedicated container plus governed writes. Inside one enterprise this works; as a general platform it keeps running into exceptions---a code agent that needs full-machine sandboxing, a Q\&A agent that needs a browser tool, a workflow agent that needs dedicated compute. Every exception brings a proposal for a ``fifth kind''.
+
+The approach here is to split those properties into four independent axes, written into each agent's \term{capability manifest}. The kind is merely a set of default values on the four axes; the policy engine and the audit rules operate on the axes, never on the kind's name. A new scenario is a new combination, not a new kind.
+
+\subsection{The four axes}
+
+\begin{table}[htbp]
+\centering
+\caption{The four axes of the capability manifest}
+\label{tab:axes}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.9cm}L{6.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Axis} & \textbf{Values} & \textbf{Meaning and who decides}\\
+  \midrule
+  Loop owner \code{loop_owner} & platform harness / platform workflow executor / tenant process / third-party process & Who implements the loop, and therefore who fulfills the container contract; decided by the definition carrier\\
+  Isolation \code{isolation} & shared pool / dedicated container / full VM & Derived from risk and tool reach; the platform may raise it, the tenant may not lower it\\
+  Side effects \code{side_effect} & read-only / governed writes / sandboxed / external & Enforced by network policy and the tool gateway, not by declaration\\
+  Recovery \code{recovery} & checkpoint: per step / per session / none; interrupt: cold / hot / none & Declared, then certified by conformance test\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\scriptsize,
+  ax/.style={font=\sffamily\bfseries\footnotesize\color{Ink},anchor=east,text width=2.2cm,align=right},
+  v/.style={rounded corners=2pt,draw=Rule,fill=SoftGray,minimum height=11mm,text width=2.75cm,align=center,inner sep=1.5mm},
+  t0/.style={font=\sffamily\bfseries\tiny,text=PrimaryDark},
+  t1/.style={font=\sffamily\bfseries\tiny,text=GreenDark},
+  t2/.style={font=\sffamily\bfseries\tiny,text=GoldDark},
+  t3/.style={font=\sffamily\bfseries\tiny,text=RustDark}
+]
+  \node[ax] (a1) {Loop owner};
+  \node[v,right=3mm of a1] (a1v1) {Platform harness\\{\tikz\node[t0]{T0};}};
+  \node[v,right=2.5mm of a1v1] (a1v2) {Platform workflow executor\\{\tikz\node[t1]{T1};}};
+  \node[v,right=2.5mm of a1v2] (a1v3) {Tenant process\\{\tikz\node[t2]{T2};}};
+  \node[v,right=2.5mm of a1v3] (a1v4) {Third-party process\\{\tikz\node[t3]{T3};}};
+
+  \node[ax,below=15mm of a1] (a2) {Isolation};
+  \node[v,right=3mm of a2] (a2v1) {Shared pool\\{\tikz\node[t0]{T0};}};
+  \node[v,right=2.5mm of a2v1] (a2v2) {Dedicated container\\{\tikz\node[t1]{T1};}\ {\tikz\node[t2]{T2};}};
+  \node[v,right=2.5mm of a2v2] (a2v3) {Full virtual machine\\{\tikz\node[t3]{T3};}};
+
+  \node[ax,below=15mm of a2] (a3) {Side effects};
+  \node[v,right=3mm of a3] (a3v1) {Read-only\\{\tikz\node[t0]{T0};}};
+  \node[v,right=2.5mm of a3v1] (a3v2) {Governed writes (via tool gateway)\\{\tikz\node[t1]{T1};}\ {\tikz\node[t2]{T2};}};
+  \node[v,right=2.5mm of a3v2] (a3v3) {Sandboxed\\{\tikz\node[t3]{T3};}};
+  \node[v,right=2.5mm of a3v3] (a3v4) {External\\conditions in Section 7.3};
+
+  \node[ax,below=15mm of a3] (a4) {Recovery};
+  \node[v,right=3mm of a4] (a4v1) {Checkpoint: per step\\{\tikz\node[t1]{T1};}\ {\tikz\node[t2]{T2};}};
+  \node[v,right=2.5mm of a4v1] (a4v2) {Checkpoint: none\\{\tikz\node[t0]{T0};}};
+  \node[v,right=2.5mm of a4v2] (a4v3) {Interrupt: cold\\{\tikz\node[t1]{T1};}\ {\tikz\node[t3]{T3};}};
+  \node[v,right=2.5mm of a4v3] (a4v4) {Interrupt: none\\{\tikz\node[t0]{T0};}\ Phase~1 default};
+
+  \node[font=\sffamily\scriptsize\color{Muted},below=6mm of a4v1.south west,anchor=north west]
+    {The T0--T3 marks are each kind's default values; admission checks the table of legal combinations by axis, not the kind's name.};
+\end{tikzpicture}%
+}
+\caption[The four axes]{The four axes of the capability manifest, with each kind's defaults}
+\label{fig:four-axes}
+\end{figure}
+
+Each axis has its own arbiter, and that is the point of the design. The loop owner is fixed objectively by the definition carrier, so a tenant cannot misstate it. Isolation is derived by the platform from risk, and a tenant can only accept a stricter level. Side-effect scope is not read from the declaration but from what network policy and the tool gateway actually allow. Recovery capability may be declared, but it counts only after a conformance test. On none of the four axes does ``whatever the tenant says'' decide.
+
+\subsection{Legal combinations and admission rules}
+
+Admission is no longer hard-coded by kind; it consults a table of legal combinations. The Phase~1 rules are:
+
+\begin{itemize}
+  \item An agent whose side-effect scope is ``external'' must run in a dedicated container or stronger and must checkpoint after every step. Reason: an agent that can cause irreversible effects on external systems needs both stricter isolation and the ability to resume from the last safe point after a failure rather than restarting from the beginning.
+  \item An agent without checkpoints may hold only a read-only tool set, and the platform's automatic retry is switched off for it. Reason: without a checkpoint there is no way to know whether a side effect occurred before the failure, so an automatic retry might perform an action twice.
+  \item Until the interrupt mechanics ship (Phase~2), any manifest that declares interrupt capability is refused at admission. Reason: the platform cannot yet handle the interrupt requests it would emit; it is better to stop it before release than to fail at runtime.
+  \item High-risk side-effect paths (money movement, for example) may be carried only by the platform's workflow executor or a tenant process, and require per-step checkpoints, cold interrupt (release the machine and recover from the checkpoint), and human approval. Reason: such paths must be statically analyzable or externally constrainable, and must be able to stop and wait for a person.
+  \item Isolation is raised automatically by the platform according to tool risk; tenants cannot request a lower level.
+\end{itemize}
+
+The rules themselves can evolve: security policy, runtime implementation and product presets change independently, and no new kind of agent requires a copy of the infrastructure.
+
+\subsection{Why resident agents are not supported}
+
+One request recurs: ``keep an agent running to watch the market'' or ``continuously listen to a queue''. The platform deliberately has no ``resident'' kind. A resident process breaks a basic assumption---that the \term{run} is the unit of metering, audit, cancellation and replay. A process that never ends has no cost that can be attributed to one action, no start and end for audit, and no safe point for cancellation.
+
+The right model is to turn ``continuous listening'' into a scheduled or event trigger that creates one bounded run per firing, so that each action is separately billed, separately authorized and separately accountable. Scheduled triggers ship in Phase~1, event triggers in Phase~2.
+
+% =============================================================================
+\section{Three Interface Layers}
+\label{sec:interfaces}
+
+The platform's interfaces follow one rule: complete on the outside, minimal on the inside. This section defines the three layers and the contract that must never be reworked.
+
+\subsection{What each layer does}
+
+The platform has three interface layers (Figure~\ref{fig:l1l2l3}): the unified API facing users (L1), the container contract between the platform and each container (L2), and the service exits through which containers reach enterprise capabilities (L3). The three are designed in deliberately opposite directions: L1 is as rich as possible, so business systems get product semantics directly; L2 is as thin as possible, so an agent written in any framework can satisfy it easily; L3 is a set of single exits, so that however a container is written it cannot bypass governance.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\sffamily\small,
+  box/.style={rounded corners=3pt,minimum width=4.3cm,minimum height=1.35cm,
+              align=center,line width=.7pt,text width=4.0cm},
+  arrow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted}
+]
+  \node[box,draw=Primary,fill=PrimaryLight] (l1)
+    {\textbf{L1 unified API}\\rich product semantics, stable externally};
+  \node[box,draw=Ink,fill=SoftGray,right=1cm of l1] (engine)
+    {\textbf{Control plane and task engine}\\identity / policy / ledger / scheduling};
+  \node[box,draw=Rust,fill=RustLight,right=1cm of engine] (l2)
+    {\textbf{L2 container contract}\\3 endpoints / 6 events / 4 variables};
+  \node[box,draw=Green,fill=GreenLight,below=1cm of engine] (l3)
+    {\textbf{L3 service exits}\\models / tools / state / artifacts};
+  \draw[arrow] (l1) -- (engine);
+  \draw[arrow] (engine) -- (l2);
+  \draw[arrow] (l2) |- (l3);
+  \draw[arrow] (l3) -- (engine);
+\end{tikzpicture}
+\caption[The three interface layers]{Separation of responsibility among L1, L2 and L3}
+\label{fig:l1l2l3}
+\end{figure}
+
+One simple rule connects the layers: every data-path operation on L1 ultimately reaches the container as one of only three actions---invoke it, probe whether it is alive, cancel it. Anything that requires \emph{remembering} something (conversation history, run progress, approval tickets) lives on the platform side, never in the container. The rule answers the recurring question of whether a feature belongs in the platform or in the container: the container does only what needs no memory.
+
+\subsection{L1: the unified API for users}
+
+L1 exposes resources that a business can understand and hides containers and vendors entirely (Table~\ref{tab:l1}). It is the one of the three entry-layer modules that faces business systems; the other two---the SDK and CLI, and the admin console---face developers and operations staff respectively (Figure~\ref{fig:zoom-entry}). Requests from all three entrances converge on the same control plane and the same ledger.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm,zoom/.append style={minimum height=16mm}]
+\node[neutral,text width=3.35cm] (a1) {Business systems · end users};
+\node[neutral,text width=3.35cm,right=5mm of a1] (a2) {Developers · CI};
+\node[neutral,text width=3.35cm,right=5mm of a2] (a3) {Operations · audit · risk};
+\node[own,zoom,below=7mm of a1] (b1) {\zc{Unified API (L1)}{Threads, runs, events, files; streaming output and resumable reads}};
+\node[own,zoom,below=7mm of a2] (b2) {\zc{SDK and CLI}{Onboarding with few changes; cloud build, release, conformance checks}};
+\node[own,zoom,below=7mm of a3] (b3) {\zc{Admin console}{Inspect, suspend, replay; every action recorded in the ledger}};
+\draw[aflow] (a1) -- (b1);
+\draw[aflow] (a2) -- (b2);
+\draw[aflow] (a3) -- (b3);
+\begin{scope}[on background layer]\node[band,fit=(b1)(b3)] {};\end{scope}
+\end{tikzpicture}
+\caption[The entry layer]{The entry layer: one entrance for each class of user (the entry region of the complete architecture)}
+\label{fig:zoom-entry}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Resource groups of the L1 unified API}
+\label{tab:l1}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.0cm}L{4.8cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Resource group} & \textbf{Core operations} & \textbf{Key semantics}\\
+  \midrule
+  Threads & Create, query, fetch history, delete & Long-lived conversation records; history is served by the platform, the container is not involved\\
+  Sessions & Query, end explicitly & Short-lived isolated execution environments, usually managed implicitly by the platform\\
+  Runs & Start, query status, cancel, resume (Phase~2), retry & Synchronous streaming or asynchronous; the run is the subject of every state machine\\
+  Events & Read from a sequence number & Clients read events only from the enterprise ledger, never directly from the container\\
+  Interrupts & Pending list, structured tickets, decisions & Phase~2; a decision reuses ``resume'' and enters the same state machine\\
+  Artifacts and files & Declare, upload, download, delete & Large objects travel by reference and presigned URLs, never through the API body\\
+  Governance resources & Agents, versions, tools, triggers, usage & Registration, release, authorization, triggers and usage queries\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+L1 has several cross-cutting constraints, each of which prevents a specific class of incident:
+
+\begin{itemize}
+  \item \textbf{Idempotent creation.} \code{POST /runs} accepts an \code{Idempotency-Key}; a repeat from the same caller with the same key within 24 hours returns the same run. This prevents a business system that times out and retries from creating two runs, with side effects and cost doubled.
+  \item \textbf{Mandatory tenant filtering.} Every read interface filters by tenant as a mandatory condition, never as an optional parameter. This prevents a tenant that guesses someone else's run ID from reading their events.
+  \item \textbf{Platform tokens only.} L1 accepts only the platform tokens issued to people, CI and business services, and rejects the run tokens held by containers (Section~\ref{sec:iam}). This prevents code inside a container from using its run token to call the management API and change authorizations.
+  \item \textbf{Trace propagation.} Every request carries a standard trace identifier (W3C traceparent) that propagates across the whole chain.
+\end{itemize}
+
+\subsection{L2: the minimal container contract that must never be reworked}
+
+L2 is the platform's most important long-term asset. It carries no product convenience; it expresses only the minimum obligation that any agent container must fulfill. The whole contract is three endpoints, six events, four environment variables and one capability manifest.
+
+\begin{codebox}
+POST /invoke  \{run\_id, thread\_id, input, resume?, context: read-only\}\\
+\hspace*{14ex}-> server-sent event stream (SSE)\\[0.4em]
+GET  /ping    -> Healthy | HealthyBusy\\[0.4em]
+POST /cancel  \{run\_id\} -> 202
+\end{codebox}
+
+The three endpoints mean: \code{/invoke} hands a run to the container, which returns its results progressively as an event stream; \code{/ping} probes whether the container is still alive---``busy'' is only a hint, and the authoritative busy/idle judgment is made on the platform side (Section~\ref{sec:execplane}); \code{/cancel} asks the container to exit at its next safe point, and if it has not done so within the grace period, the cloud adapter destroys it.
+
+The six events reduce the internal differences among frameworks to one shared semantics (Table~\ref{tab:l2}). Any framework that can translate its own execution into these six events can be hosted.
+
+\begin{table}[htbp]
+\centering
+\caption{Composition of the L2 contract}
+\label{tab:l2}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.9cm}L{6.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Component} & \textbf{Content} & \textbf{Purpose}\\
+  \midrule
+  3 endpoints & \code{invoke}, \code{ping}, \code{cancel} & Be invoked, report liveness, be canceled\\
+  6 events & \code{message.delta} (output fragment), \code{tool.call} (tool call), \code{checkpoint}, \code{interrupt} (request for input), \code{artifact} (reference), \code{run.status} (state and terminal status) & Reduce framework differences to one event semantics\\
+  4 environment variables & \code{MODEL_GATEWAY_URL}, \code{TOOL_HUB_URL}, \code{CHECKPOINT_STORE}, \code{ARTIFACT_STORE} & Inject only the addresses of platform capabilities, never a long-lived secret\\
+  1 manifest & Four axes, streaming flag, maximum run duration, harness version & Declare capability, limits and the harness version\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+The four environment variables deserve a word. They are how the platform tells a container ``where the models are, where the tools are, where checkpoints go, where artifacts go''. The container holds no secret at all---only these four addresses. The short-lived run token bound to the current run is not placed in an environment variable; it is injected with each invocation's read-only context, valid for minutes, then void. That is how Invariant~1 (no long-lived secret inside a container) is implemented.
+
+\subsection{Persisting and distributing events}
+
+Events produced by a container are recorded by the platform first and distributed to clients second. This serves three purposes: a client that disconnects can resume from the ledger by sequence number; events remain replayable after the container has exited; and event order is decided by the platform, so a container cannot forge it.
+
+``Record first'' must not, however, be read as one synchronous database write per output fragment---that would put a disk write on the streaming path of every token and visibly degrade the streaming experience. Different events therefore get different persistence levels (Table~\ref{tab:persist}): tool calls, checkpoints, artifacts and terminal status are fact or control events and must be committed to the main ledger before distribution; output fragments serve the streaming experience, so they receive a sequence number, are written to a short-retention stream table, are distributed immediately, and are merged into message records in batches.
+
+\begin{table}[htbp]
+\centering
+\caption{Persistence levels for the two classes of event}
+\label{tab:persist}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.4cm}L{4.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Event class} & \textbf{Condition before distribution} & \textbf{Semantics on failure}\\
+  \midrule
+  Fact and control events & Committed to the main event table & Fully resumable and auditable; loss is not accepted\\
+  Output fragments \code{message.delta} & Received by the short-retention stream table and given a sequence number & Weak persistence allowed; at most the fragments not yet merged may be lost\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+The container supplies an \code{event_id} for de-duplication but cannot choose the sequence number; the platform assigns it on receipt. If the container-to-platform link breaks, the run enters the failed state marked retryable, and whether it is actually retried is decided by the rules in Section~\ref{sec:reliability}.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.96\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  box/.style={draw=Primary,fill=PrimaryLight,rounded corners=2pt,
+              minimum width=2.6cm,minimum height=10mm,align=center,line width=.7pt,text width=2.4cm},
+  store/.style={box,draw=Gold,fill=GoldLight},
+  arrow/.style={-{Stealth[length=2mm]},line width=.75pt,color=Muted},
+  stepbadge/.style={circle,draw=Primary,fill=white,minimum size=4.8mm,inner sep=0pt,
+                    font=\sffamily\bfseries\tiny,text=PrimaryDark,line width=.65pt}
+]
+  \node[box] (client) {Caller};
+  \node[box,right=7mm of client] (api) {Unified API /\\task engine};
+  \node[box,right=7mm of api] (container) {Agent container};
+  \node[box,draw=Green,fill=GreenLight,right=7mm of container] (gateway) {Event intake};
+  \node[store,right=7mm of gateway] (ledger) {Enterprise event ledger};
+  \draw[arrow] (client) -- node[stepbadge]{1} (api);
+  \draw[arrow] (api) -- node[stepbadge]{2} (container);
+  \draw[arrow] (container) -- node[stepbadge]{3} (gateway);
+  \draw[arrow] (gateway) -- node[stepbadge]{4} (ledger);
+  \draw[arrow] (ledger.south) -- ++(0,-8mm) -|
+    node[stepbadge,pos=.52]{5} (client.south);
+\end{tikzpicture}%
+}
+\par\smallskip
+{\scriptsize\color{Muted}
+  \textbf{1} create run\quad
+  \textbf{2} invoke the container contract\quad
+  \textbf{3} report the six events\quad
+  \textbf{4} assign sequence numbers and write by persistence level\quad
+  \textbf{5} stream, resume after disconnect, replay for audit\par}
+\caption[Record first, then distribute]{Record first, then distribute: fact events are durably written before delivery; output fragments go through a short-retention stream table to keep streaming latency low}
+\label{fig:event-flow}
+\end{figure}
+
+\subsection{How the contract evolves}
+
+The format of the six events is frozen in Phase~1, but frozen does not mean unchangeable. The evolution rule is ``add, never alter'': new fields must be optional; every event carries a \code{schema_version}; and the platform reads at least two versions for a period. The interrupt event and the resume field are defined in Phase~1 and implemented in Phase~2, so that Phase~2 does not change the contract of any container already in production.
+
+\subsection{L3: the exits through which containers reach enterprise capabilities}
+
+L3 consists of the model gateway, the tool gateway, the checkpoint store, the artifact service and (in Phase~2) the memory service. A running container can reach external capabilities only through L3: the platform injects the addresses of these services as environment variables, and the container authenticates with a run token valid for minutes. The container holds neither a management-API token nor any long-lived tool credential. Section~\ref{sec:shared} describes this layer in detail.
+
+% =============================================================================
+\section{One Request, End to End}
+\label{sec:lifecycle}
+
+The preceding sections covered the architecture, the capability manifest and the interfaces separately. This section strings them together on one concrete example: a business system asks an agent to read some business data and produce a report file. Nothing in the walk-through depends on a particular agent framework or cloud vendor.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\scriptsize,
+  card/.style={rounded corners=3pt,minimum width=4.0cm,minimum height=1.2cm,
+               text width=3.6cm,align=center,line width=.75pt,inner sep=2.5mm},
+  flow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted}
+]
+  \node[card,draw=Primary,fill=PrimaryLight] (s1) {\textbf{1 · Submit}\\the business system requests a run};
+  \node[card,draw=Primary,fill=PrimaryLight,right=7mm of s1] (s2) {\textbf{2 · Admit}\\identity, delegation, policy, budget};
+  \node[card,draw=Gold,fill=GoldLight,right=7mm of s2] (s3) {\textbf{3 · Record}\\create the run and its first events};
+
+  \node[card,draw=Rust,fill=RustLight,below=7mm of s3] (s4) {\textbf{4 · Schedule}\\the adapter deploys or reuses an environment};
+  \node[card,draw=Green,fill=GreenLight,left=7mm of s4] (s5) {\textbf{5 · Reason}\\call the model gateway with the run token};
+  \node[card,draw=Green,fill=GreenLight,left=7mm of s5] (s6) {\textbf{6 · Act}\\the tool gateway authorizes and injects credentials};
+
+  \node[card,draw=Gold,fill=GoldLight,below=7mm of s6] (s7) {\textbf{7 · Archive}\\checkpoint, tool results, artifact references};
+  \node[card,draw=Gold,fill=GoldLight,right=7mm of s7] (s8) {\textbf{8 · Distribute}\\assign sequence numbers, write ledger and stream table};
+  \node[card,draw=Primary,fill=PrimaryLight,right=7mm of s8] (s9) {\textbf{9 · Settle}\\terminal state, usage, cost and audit};
+
+  \draw[flow] (s1) -- (s2);
+  \draw[flow] (s2) -- (s3);
+  \draw[flow] (s3) -- (s4);
+  \draw[flow] (s4) -- (s5);
+  \draw[flow] (s5) -- (s6);
+  \draw[flow] (s6) -- (s7);
+  \draw[flow] (s7) -- (s8);
+  \draw[flow] (s8) -- (s9);
+\end{tikzpicture}%
+}
+\caption[Nine steps of one run]{One run in nine steps, from business request to settled facts}
+\label{fig:run-lifecycle}
+\end{figure}
+
+\begin{enumerate}
+  \item \textbf{Submit.} The business system calls \code{POST /runs} with its own platform token, an idempotency key, and---if the call is made on behalf of a user---an on-behalf-of token issued by the identity provider.
+  \item \textbf{Admit.} The unified API resolves the tenant from the authenticated identity, verifies the signature of the delegation token, and checks that the agent version is available, that the tool authorizations are valid, that no structural denial is touched, and that the budget is not exceeded. Any failure rejects the request here, recorded in the ledger as a \emph{policy denial}, not a system error.
+  \item \textbf{Record.} The task engine creates the run under the idempotency key (a repeat returns the same run) and writes the admission result and initial state to the enterprise ledger. From this moment the run has a sequence number, an identity chain and a budget ceiling.
+  \item \textbf{Schedule.} The scheduler chooses execution resources from the capability manifest, deploys a new environment or reuses an existing one through the cloud adapter, and calls the container's \code{/invoke}.
+  \item \textbf{Reason.} The container holds only a short-lived token bound to this run. When it needs a model, the request goes through the model gateway, which checks the model allow-list, deducts the usage budget and records the token count of the call.
+  \item \textbf{Act.} The agent decides to call a tool that reads business data. The tool gateway recomputes the agent's effective permission at that moment, checks the idempotency key, fetches the required credential briefly from the credential vault and calls the target system on the agent's behalf. The container never touches the credential.
+  \item \textbf{Archive.} Tool results, model results and the checkpoint taken before the side effect are archived. The generated report is stored in object storage; the ledger keeps only a content digest and a reference.
+  \item \textbf{Distribute.} The event intake de-duplicates, assigns sequence numbers, writes fact events to the main ledger and output fragments to the short-retention stream table, and streams to the client. A disconnected client resumes by sequence number.
+  \item \textbf{Settle.} When the run reaches a terminal state, the platform totals model, tool, runtime, sandbox and storage usage and produces the internal allocation, vendor reconciliation and audit views.
+\end{enumerate}
+
+Several things are visible in this walk-through. The container never obtained a secret. Every external action---calling a model, calling a tool---passed an exit the platform can record and refuse. The order and authenticity of events were decided by the platform, not the container. And the cost was attributed to a specific tenant and run the moment the run ended. Those four observations are, respectively, controllable, auditable, observable and meterable.
+
+% =============================================================================
+\section{Runtime Semantics}
+\label{sec:runtime}
+
+State, channels and execution facts: this section fixes the vocabulary that the runtime services share. This section and the next correspond to the runtime-services partition of the complete architecture (Figure~\ref{fig:zoom-data})---the high-frequency path every run passes through. The task engine and the session service track where a run has got to and which conversation it belongs to; metering and reconciliation track what it cost; files and artifacts track what it produced; observability tracks whether the system is healthy; interrupt and resume and the memory service are two capabilities added in Phase~2. This section first covers the runtime semantics these modules all rely on: how state is divided, how many channels exist, and how a run changes state.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm,zoom/.append style={minimum height=18mm}]
+\node[own,zoom] (d1) {\zc{Task engine}{Run state machine, circuit breaker, safe retries}};
+\node[own,zoom,right=of d1] (d2) {\zc{Session service}{Authoritative mapping of threads to sessions}};
+\node[own,zoom,right=of d2] (d3) {\zc{Metering and reconciliation}{Internal allocation, vendor bill, reconciliation}};
+\node[own,zoom,right=of d3] (d4) {\zc{Files and artifacts}{Reference management; presigned direct transfer}};
+\node[open,zoom,below=of d1] (d5) {\zc{Observability}{Open-standard instrumentation; log intake and redaction}};
+\node[own,zoom,right=of d5] (d6) {\zc{Interrupt and resume}{Archive, release the machine, continue from the archive}};
+\node[own,zoom,right=of d6] (d7) {\zc{Memory service}{Long-term memory across sessions; sanitized before writing}};
+\begin{scope}[on background layer]\node[band,fit=(d1)(d4)(d7)] {};\end{scope}
+\end{tikzpicture}
+\caption[Runtime services]{The seven modules of runtime services (the runtime-services region of the complete architecture)}
+\label{fig:zoom-data}
+\end{figure}
+
+\subsection{Three concepts that must not be merged: session, thread, run}
+
+The platform describes runtime state with three concepts that are often confused but govern different things (Table~\ref{tab:str}). A plain analogy: a \term{session} is like a private room opened for a visit and closed afterwards; a \term{thread} is like the complete record of one customer's dealings with the enterprise across many visits; a \term{run} is like one specific piece of business, with a start, a result and a cost.
+
+\begin{table}[htbp]
+\centering
+\caption{Session, thread and run}
+\label{tab:str}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.4cm}YYY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  & \textbf{Session} & \textbf{Thread} & \textbf{Run}\\
+  \midrule
+  What it is & A lease on an isolated execution environment & The history of a conversation & One execution with a terminal state\\
+  What it governs & Isolation, resources, in-memory state & Continuity of context across turns & Progress, events, retries, cost\\
+  Lifetime & Occupies a machine while active, released when idle & Long-lived, spanning many sessions & Minutes to hours\\
+  Authoritative source & The platform's session map plus the vendor's lease & The enterprise session service & The task engine and the event ledger\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+A thread may span many sessions: each active period is bound to one session, the session is released when idle, and the next active period opens a new one. The mapping between threads and sessions is authoritative data held by the enterprise; the mechanical implementation of ``route the same user's requests to the same machine'' (session affinity) can be rented from the vendor.
+
+\subsection{Five action channels and one set of state services}
+
+A running agent can affect the outside world through exactly five channels (Figure~\ref{fig:five-windows}). Outside those five is a wall made of network policy and sandboxes. As long as the platform guards the five channels, side effects, identity, cost and events all enter one governance chain even when the code inside the container is completely untrusted. State and data services (checkpoints, artifacts, memory) support the channels but are not action channels themselves, because they do not affect the outside world.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  core/.style={circle,draw=Primary,fill=PrimaryLight,minimum size=2.7cm,
+               align=center,line width=.9pt,font=\sffamily\bfseries\normalsize},
+  window/.style={rounded corners=3pt,minimum width=3.5cm,minimum height=10mm,
+                 align=center,line width=.7pt,text width=3.25cm},
+  flow/.style={<->,>=Stealth,line width=.7pt,color=Muted},
+  state/.style={rounded corners=3pt,draw=Gold,fill=GoldLight,
+                minimum width=8.2cm,minimum height=10mm,align=center}
+]
+  \node[core] (agent) {Running\\agent};
+  \node[window,draw=Primary,fill=PrimaryLight,above left=14mm and 20mm of agent] (invoke)
+    {1 · Platform invoke\\being called};
+  \node[window,draw=Green,fill=GreenLight,above right=14mm and 20mm of agent] (model)
+    {2 · Model gateway\\calling a model};
+  \node[window,draw=Green,fill=GreenLight,right=28mm of agent] (tool)
+    {3 · Tool gateway\\acting on external systems};
+  \node[window,draw=Rust,fill=RustLight,below right=14mm and 20mm of agent] (human)
+    {4 · Interrupt\\asking a person};
+  \node[window,draw=Purple,fill=PurpleLight,below left=14mm and 20mm of agent] (delegate)
+    {5 · Agent as tool\\calling another agent};
+  \node[state,below=28mm of agent] (state)
+    {State services: checkpoints · files and artifacts · long-term memory};
+
+  \draw[flow] (agent) -- (invoke);
+  \draw[flow] (agent) -- (model);
+  \draw[flow] (agent) -- (tool);
+  \draw[flow] (agent) -- (human);
+  \draw[flow] (agent) -- (delegate);
+  \draw[flow,dashed] (agent) -- (state);
+\end{tikzpicture}
+\caption[The five action channels]{Five action channels form a closed governance boundary; state services carry recovery and data separately}
+\label{fig:five-windows}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{The five action channels and their governance}
+\label{tab:windows}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.0cm}L{4.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Interaction} & \textbf{Only channel} & \textbf{Governance on the channel}\\
+  \midrule
+  Being called & The platform's invoke interface & Authentication, rate limits, circuit breaker, placement; container ports are not exposed publicly\\
+  Calling a model & The model gateway & Data classification, model allow-list, usage budget, metering, blocklist\\
+  Acting on external systems & The tool gateway & Permission intersection, risk tiers, parameter-level controls, idempotency, authoritative events\\
+  Asking a person & An interrupt ticket (Phase~2) & Routing by type, timeouts, approver and decision recorded in the event stream\\
+  Calling another agent & The callee registered as a tool & Tool governance applies; delegation can only narrow permissions\\
+  \rowcolor{GoldLight}
+  State and data & Checkpoints, artifacts, files, memory & Tenant isolation, expiry, transfer by reference, sanitization before writing; not an action channel\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+This closed boundary constrains recognizable interfaces, networks and platform state channels. Covert channels---DNS, timing signals, or influencing a later input through artifact content---are outside the threat model of this paper and must be handled separately with egress proxies, content sanitization, rate limiting and independent security assessment.
+
+\subsection{The run state machine}
+
+A run's state changes are simple (Figure~\ref{fig:run-state}): queued, running, and then one of three terminal states---completed, failed or canceled. Phase~2 adds an ``input required'' state for interrupt and resume.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.9\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  state/.style={draw=Primary,fill=PrimaryLight,rounded corners=3pt,
+                minimum width=2.7cm,minimum height=10mm,align=center,line width=.7pt},
+  terminal/.style={state,draw=Muted,fill=SoftGray},
+  wait/.style={state,draw=Gold,fill=GoldLight},
+  arrow/.style={-{Stealth[length=2mm]},line width=.75pt,color=Muted},
+  flowlabel/.style={font=\sffamily\tiny,fill=white,inner xsep=1.5pt,
+                   inner ysep=.7pt,text=Muted}
+]
+  \node[state] (queued) {queued};
+  \node[state,right=13mm of queued] (running) {running};
+  \node[wait,below=15mm of running,text width=3.2cm] (input) {input\_required\\(Phase~2)};
+  \node[terminal,above right=10mm and 23mm of running] (done) {completed};
+  \node[terminal,right=31mm of running] (failed) {failed};
+  \node[terminal,below right=10mm and 23mm of running] (cancel) {canceled};
+  \draw[arrow] (queued) -- (running);
+  \draw[arrow] (running) -- node[flowlabel,right=1.3mm]{interrupt} (input);
+  \draw[arrow] (input.west) to[out=180,in=180,looseness=1.35]
+    node[flowlabel,left=1mm]{resume} (running.west);
+  \draw[arrow] (running) -- (done);
+  \draw[arrow] (running) -- (failed);
+  \draw[arrow] (running) -- (cancel);
+\end{tikzpicture}%
+}
+\caption[The run state machine]{The run state machine; policy denials and budget overruns use their own error classes}
+\label{fig:run-state}
+\end{figure}
+
+The failed state carries an error class with at least four values: retryable, terminal, policy denied, budget exceeded. ``Policy denied'' deserves emphasis: an agent stopped by risk control is not a platform fault but evidence that control is working. It must be distinguished from genuine faults in monitoring metrics, in audit records and in what the caller sees; otherwise operations staff will treat normal interventions as incidents to be ``fixed''.
+
+\subsection{Who owns which state}
+
+Principle~4 in Section~\ref{sec:method} requires state ownership to be explicit. Table~\ref{tab:state-owner} gives the assignment; recovery follows it.
+
+\begin{table}[htbp]
+\centering
+\caption{Authoritative ownership of the four kinds of state and what recovery means}
+\label{tab:state-owner}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.0cm}L{4.8cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{State} & \textbf{Authoritative owner} & \textbf{Meaning at recovery}\\
+  \midrule
+  Conversation state & The session service and the thread & Provides continuity of history; not the same as resuming execution\\
+  Execution state & The checkpoint & Determines the safe point to continue from\\
+  Environment state & The session's file system and artifacts & Needs references, snapshots or rebuilding\\
+  Long-term memory & The memory service (Phase~2) & Not part of execution recovery; sanitized before writing\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+% =============================================================================
+\section{Reliability and Safety Controls}
+\label{sec:reliability}
+
+This section covers four mechanisms: the circuit breaker, idempotency, recovery, and shutdown. Together they answer one question: when an agent runs away, repeats itself, gets stuck, or must be stopped at once, what bounds the damage?
+
+\subsection{The circuit breaker: a hard ceiling on loss}
+
+The task engine sets hard ceilings on every run: number of steps, number of tool calls, model usage, wall-clock duration and estimated spend. Exceeding any one of them moves the run immediately to the ``budget exceeded'' terminal state. At the tenant level there are ceilings on concurrency and daily spend, with overridable defaults; the shared pool has both pool-level and tenant-level concurrency ceilings, so that one tenant's burst cannot crowd out the others.
+
+The circuit breaker and quota management are two different things. Quota management---screens, approval workflows, periodic policies---can be built in Phase~2; the circuit breaker is a fuse and must exist in Phase~1. The reason is blunt: without it, the platform discovers its first runaway loop only after the fact, when the metering system can explain how much money was lost but could not have prevented it. The breaker costs almost nothing to build---a few counters and comparisons---and it is the mechanism most likely to be needed in the first week of production.
+
+\subsection{Two kinds of idempotency, kept apart}
+
+``Idempotent'' means that repeating an operation produces no additional effect. The platform needs two kinds, with different keys and different purposes (Table~\ref{tab:idem}).
+
+\begin{table}[htbp]
+\centering
+\caption{Two kinds of idempotency}
+\label{tab:idem}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.2cm}L{5.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Kind} & \textbf{Key} & \textbf{Problem it solves}\\
+  \midrule
+  Creation idempotency & An \code{Idempotency-Key} scoped to the caller & A network retry must not create multiple runs\\
+  Side-effect idempotency & \code{run_id} + \code{step_id} + \code{attempt} & Recovery or retry must not perform a real action a second time\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+Automatic retry is capped at three attempts by default, with increasing intervals. Whether a failure may be retried automatically is decided not by what the container claims but by the tool gateway's idempotency ledger: a failure is retryable only if no unconfirmed side effect has occurred since the last checkpoint. Agents without checkpoints have automatic retry switched off by default.
+
+\subsection{Effectively-once side effects}
+
+A distributed system cannot guarantee, from a single network request, that a real-world action happens exactly once. The architecture composes an equivalent guarantee from three things:
+
+\begin{align*}
+  &\text{checkpoint before the effect}
+  + \text{tool-gateway idempotency ledger}
+  + \text{archived results}\\
+  &\qquad\Rightarrow\ \text{effectively once}
+\end{align*}
+
+The first ensures there is a point to return to after a failure; the second ensures that, having returned, an action already performed is not performed again; the third ensures that the model's output is archived too---recovery does not re-sample the model, because otherwise the same run might take a different branch after recovery.
+
+\subsection{The three-stage kill switch}
+
+Stopping a rogue agent cannot depend on the cloud vendor's management API happening to be available at that moment. The shutdown path therefore has three stages (Figure~\ref{fig:three-gate-kill}):
+
+\begin{enumerate}
+  \item \textbf{Stop issuing.} Disable the agent in the registry; the platform issues it no new run tokens.
+  \item \textbf{Cut its hands.} The model gateway and the tool gateway reject the tokens it already holds, by agent ID. From this point it can call no model and no tool, and therefore cannot cause any further external side effect.
+  \item \textbf{Destroy the instance.} The cloud adapter calls the vendor's API to reclaim the machine.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.92\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  gate/.style={rounded corners=3pt,minimum width=3.7cm,minimum height=1.3cm,
+               text width=3.3cm,align=center,line width=.8pt},
+  flow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted},
+  tag/.style={font=\sffamily\scriptsize,color=Muted}
+]
+  \node[gate,draw=Primary,fill=PrimaryLight] (g1)
+    {\textbf{Stage 1 · Stop issuing}\\registry disabled\\no new run tokens};
+  \node[gate,draw=Green,fill=GreenLight,right=9mm of g1] (g2)
+    {\textbf{Stage 2 · Cut its hands}\\model and tool gateways\\reject the agent ID};
+  \node[gate,draw=Rust,fill=RustLight,right=9mm of g2] (g3)
+    {\textbf{Stage 3 · Destroy}\\cloud adapter reclaims\\the instance};
+  \draw[flow] (g1) -- (g2);
+  \draw[flow] (g2) -- (g3);
+  \draw[Primary,line width=.7pt] ([yshift=7mm]g1.north west) --
+    node[tag,above,text=PrimaryDark]{takes effect at once, inside the enterprise boundary}
+    ([yshift=7mm]g2.north east);
+  \draw[Rust,line width=.7pt] ([yshift=7mm]g3.north west) --
+    node[tag,above,text=RustDark]{depends on the vendor; eventual}
+    ([yshift=7mm]g3.north east);
+\end{tikzpicture}%
+}
+\caption[The three-stage kill switch]{The three-stage kill switch: the first two stages remove the ability to act; the third reclaims resources}
+\label{fig:three-gate-kill}
+\end{figure}
+
+The first two stages lie entirely within the enterprise's boundary. Even if the third fails for a while, the agent has already lost the ability to act; what remains is a machine that is running but can do nothing. A normal decommission drains: stop accepting new runs, let compliant runs in progress finish, close pending tickets, then reclaim.
+
+\subsection{Interrupt and resume, delivered in three layers}
+
+``Interrupt and resume'' covers the case where an agent must wait in the middle of a run---for a human approval, for an external callback, for another agent's result---and the platform saves its state, releases the machine, and continues from the archive when the result arrives. The need is not specific to one kind: a code agent asking a person and a workflow agent waiting for approval both use it.
+
+It is split into three layers delivered in different phases (Table~\ref{tab:interrupt}). The reasoning: the first layer costs almost nothing but, if skipped, forces Phase~2 to modify every container in production; the second comes with the SDK anyway and also gives long tasks a way to rerun after failure; the real engineering effort is the third layer, and neither of the Phase~1 kinds depends on it---multi-turn Q\&A is one run per turn and needs no mid-run interrupt, and most of the cost of waiting is already covered by the vendor's busy/idle billing.
+
+\begin{table}[htbp]
+\centering
+\caption{Interrupt and resume in three layers}
+\label{tab:interrupt}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.2cm}L{1.8cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Layer} & \textbf{Phase} & \textbf{Content}\\
+  \midrule
+  Event format frozen & 1 & The interrupt event and the resume field enter the container contract; no later change to the contract\\
+  Checkpoints in place & 1 & The SDK shell configures a checkpoint store by default; long tasks can be rerun from the archive on a best-effort basis\\
+  Execution mechanics & 2 & Save the checkpoint, release the machine, route the ticket, resume, continue from the archive in a new session\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+% =============================================================================
+\section{How Each Kind Fulfills the Contract}
+\label{sec:fulfill}
+
+All four kinds face the same container contract, but who implements it differs (Table~\ref{tab:fulfill}): Q\&A and workflow agents are implemented by platform code, so compliance is guaranteed by construction; code agents are implemented by tenant code through the SDK, so they need declaration plus certification; autonomous agents are implemented by the platform's shim on behalf of a third-party process.
+
+\begin{table}[htbp]
+\centering
+\caption{How each kind fulfills the contract}
+\label{tab:fulfill}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.0cm}L{2.8cm}L{5.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Kind} & \textbf{Loop owner} & \textbf{How the platform implements it} & \textbf{Key boundary}\\
+  \midrule
+  T0 & Platform harness & A shared, stateless harness pool; identity injected per request; tool allow-list decided by platform code & The version is the manifest plus the harness version\\
+  T1 & Platform workflow executor & A six-node workflow language; static analysis of schema, topology and policy & What is signed off must be a declarative workflow\\
+  T2 & Tenant process & An HTTP-plus-event-stream protocol shell, framework adapters, gateway and network backstops & Capability certified by tests of recovery, rebuild and egress\\
+  T3 & Third-party process & An orchestrator or shim attached to a fully isolated environment & The shim is not a security boundary; high-risk paths must be distilled into T1\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{T0: the platform harness}
+
+A Q\&A agent does not get its own process. Deployment writes one manifest into the registry, and execution happens in a shared harness pool. The harness is stateless: identity is injected per request, the system instructions and the tenant's prompt are kept in separate segments, and the tool allow-list is decided by platform code---the tenant's prompt is data, and nothing it says can widen the tool set.
+
+Because the harness is the common code of every Q\&A agent, it carries a risk that must be governed: one bad harness upgrade stops the largest class of agents at once. A Q\&A agent's version is therefore not a single prompt version but the pair ``manifest version + harness version''; harness upgrades are canaried, the registry can pin a tenant to a harness version, and the harness itself passes conformance tests. The shared pool also enforces tenant-level concurrency ceilings and allocates the vendor's busy-time bill to tenants by their share of active time.
+
+\subsection{T1: the platform workflow executor (Phase~2)}
+
+A workflow agent uses a deliberately limited workflow language with only six node types: tool, model, human, branch, parallel, sub-workflow. Branch conditions use deterministic expressions, and each node's input and output are described with JSON Schema. Not being Turing-complete is intentional: only because the language is limited can a workflow be analyzed before release and signed off by risk control.
+
+Compilation has three stages: schema validation, topology validation, and static policy analysis. The most important policy check is dominance: for every high-risk tool node, every path that can reach it must pass through a human approval node; a path that bypasses approval is rejected at compile time.
+
+The platform expressly forbids ``convert code to a workflow automatically and run it''. Developers may write code, non-developers may draw workflows, machines may generate drafts, but what is finally signed off must be a declarative workflow that can be verified statically and held to account. Handing risk control a possibly incomplete diagram reverse-engineered from code amounts to forged compliance.
+
+\subsection{T2: the tenant container through the SDK}
+
+A code agent is implemented in three layers (Figure~\ref{fig:t2-shell}):
+
+\begin{enumerate}
+  \item \textbf{The protocol shell.} A framework-independent HTTP and event-stream service that implements the three endpoints. It turns the tenant's program from a script that exits when finished into a resident service; the port is not exposed publicly.
+  \item \textbf{The semantic adapter.} It translates a specific framework's execution into the six events and connects the framework's state-saving mechanism to the platform's checkpoint store. The platform maintains adapters for a small number of mainstream frameworks; capabilities a framework lacks are not faked but declared honestly as downgraded.
+  \item \textbf{The untrusting backstop.} This layer is framework-independent: authoritative tool-call events come from the tool gateway, side-effect scope is enforced by network policy, and capability is certified by test. The first two layers are conveniences for the tenant; the third is the platform's guarantee.
+\end{enumerate}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  layer/.style={rounded corners=3pt,minimum width=6.6cm,minimum height=11mm,
+                align=center,line width=.7pt,text width=6.2cm},
+  side/.style={rounded corners=3pt,minimum width=3.4cm,minimum height=11mm,
+               align=center,line width=.7pt,text width=3.1cm},
+  arrow/.style={-{Stealth[length=2mm]},line width=.75pt,color=Muted},
+  cbox/.style={draw=Rust,dashed,rounded corners=4pt,inner sep=4pt,line width=.7pt}
+]
+  \node[layer,draw=Gold,fill=GoldLight] (code) {\textbf{Tenant code}\\agent logic written in any framework};
+  \node[layer,draw=Green,fill=GreenLight,below=3mm of code] (adapter) {\textbf{Semantic adapter}\\framework events $\rightarrow$ six events; framework state $\rightarrow$ checkpoint store};
+  \node[layer,draw=Primary,fill=PrimaryLight,below=3mm of adapter] (shell) {\textbf{Protocol shell}\\HTTP and event stream: invoke / ping / cancel};
+  \node[cbox,fit=(code)(adapter)(shell)] (container) {};
+  \node[font=\sffamily\scriptsize\color{RustDark},anchor=south west] at (container.north west) {dedicated container (built in the platform's cloud pipeline, entry point locked)};
+
+  \node[side,draw=Ink,fill=SoftGray,left=9mm of shell] (engine) {\textbf{Platform task engine}\\invoke, probe, cancel};
+  \node[side,draw=Green,fill=GreenLight,right=9mm of adapter] (gw) {\textbf{Model and tool gateways}\\authoritative events, credential injection};
+  \node[side,draw=Muted,fill=white,right=9mm of code] (env) {\textbf{Environment variables}\\four service addresses + run token};
+
+  \draw[arrow] (engine) -- (shell);
+  \draw[arrow] (adapter) -- (gw);
+  \draw[arrow] (env) -- (code);
+  \node[font=\sffamily\scriptsize\color{Muted},below=3mm of container.south,text width=12cm,align=center]
+    {Untrusting backstop: authoritative events at the gateways, side effects enforced by network policy, capability certified by test---independent of the framework inside the container};
+\end{tikzpicture}%
+}
+\caption[The three layers of a code agent]{A code agent's three layers: tenant code, semantic adapter, protocol shell---plus a framework-independent untrusting backstop}
+\label{fig:t2-shell}
+\end{figure}
+
+Migrating an existing agent comes down to ``three redirections and one entry point'': point the model at the model gateway, point tool calls at the tool gateway, connect state saving to the framework's checkpoint socket, and let the SDK shell provide the entry point. Business logic does not change. The following pseudo-code illustrates the migration boundary only; it does not represent real SDK names:
+
+\rowcolors{1}{white}{white}
+\begin{codebox}
+\begin{tabular}{@{}l@{}}
+model.base\_url      <- MODEL\_GATEWAY\_URL      \# model via gateway\\
+tools.endpoint      <- TOOL\_HUB\_URL           \# tools via gateway\\
+checkpoint.backend  <- CHECKPOINT\_STORE       \# state to checkpoint store\\
+runtime.agent       <- my\_graph               \# business logic unchanged\\
+runtime.serve()     \# SDK shell: invoke / ping / cancel + events
+\end{tabular}
+\end{codebox}
+
+Images are built by the platform in its cloud pipeline; the container's entry point is locked by the build, and the tenant can declare only dependencies and a code directory, never replace the protocol shell; the shell's version is reported with the terminal event. This is not a security boundary (the security boundary is at the gateways and the network) but a guarantee against drift: a certified shell cannot be quietly swapped out at deployment time.
+
+Conformance certification includes at least three destructive tests: whether the process recovers as declared after being killed; whether it rebuilds after its session is reclaimed; and whether an egress block really leaves no bypass. The test suite is not part of the runtime architecture, but it is an indispensable deliverable for admission to production.
+
+\subsection{T3: the orchestrator and the shim (Phase~3)}
+
+Autonomous agents require separating three things that are often conflated:
+
+\begin{itemize}
+  \item \textbf{Topology.} A platform orchestrator with a thin daemon inside the sandbox, or a third-party command-line agent with a platform shim. This is what the kind's definition covers.
+  \item \textbf{Product.} An optional cloud development environment, long-lived conversations and multi-person collaboration. This is a product line, not part of the kind.
+  \item \textbf{Governance pipeline.} Explore, distil a draft workflow, compile, obtain human sign-off, and finally promote to T1. This is the channel through which an autonomous agent's output enters production safely.
+\end{itemize}
+
+The shim is a thin layer wedged between the platform and the third-party process. It does six things: manage the process lifecycle, translate the third party's output into the six events, forward its permission requests to the platform for decision, carry out platform instructions, hold only short-lived tokens, and handle failure semantics. It explicitly does not make decisions, does not enforce network blocking, and does not interpret the third party's business semantics. Because it runs on the same machine as an untrusted process, the design must assume it can be compromised; it is not a security boundary. The boundary is full-machine isolation, the model gateway and the controlled network exit. Whole-machine snapshots must be encrypted with a tenant key, carry an expiry, and be scanned for known secret patterns before restore; short-lived tokens are never included in a snapshot and are re-injected on restore.

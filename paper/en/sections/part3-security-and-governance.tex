@@ -1,0 +1,530 @@
+% =============================================================================
+\whitepaperpart{III}{Security, Governance and Runtime Control}
+{Constraining untrusted intelligent behavior inside a verifiable boundary: principal identity, the single exits for side effects, the audit ledger, the authoritative store, and the boundary with cloud vendors.}
+
+% =============================================================================
+\section{Threat Model and Trust Boundary}
+\label{sec:threat}
+
+First, who the platform trusts and who it does not. Tenant code, model output, external files and third-party tool responses are all assumed to be potentially malicious or tainted. The enterprise identity provider, the policy service, the ledger's write path and the gateways' service identities are the controlled roots of trust. The cloud vendor is trusted to provide the compute and storage agreed in the contract, but not to hold the only copy of governance facts, and not to hold final decision rights.
+
+Under that premise, Table~\ref{tab:threats} lists the main threats, the mitigation for each, and what still needs attention after mitigation.
+
+\begin{table}[htbp]
+\centering
+\caption{Threat model}
+\label{tab:threats}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.4cm}L{5.6cm}Y@{}}
+  \toprule
+  \rowcolor{RustLight}
+  \textbf{Threat} & \textbf{Main mitigation} & \textbf{Still requires attention}\\
+  \midrule
+  Malicious or compromised tenant code & Dedicated containers or micro-VMs, controlled egress, short-lived run tokens only & Kernel and hypervisor escapes\\
+  Prompt injection and the cross-tool ``confused deputy'' & Tool allow-lists, permission intersection, parameter policies, separation of sensitive reads from outbound sends & Legitimate permission combinations being induced into misuse\\
+  Credential theft & Credentials fetched only by the tool gateway, briefly; never in the container, the model context or snapshots & Compromise of the gateway's service identity\\
+  Memory and file poisoning & Source tagging, sanitization before writing, expiry, separation of read and write rights & Implicit instructions in unstructured content\\
+  Bypassed approval or repeated side effects & Dominance checks, structured interrupt tickets, the tool idempotency ledger & External systems that are not themselves idempotent\\
+  Vendor failure or lock-in & Enterprise-held state, the five-primitive adapter, rehearsed exit, the three-stage kill switch & Hosted compute can see runtime plaintext\\
+  Audit repudiation or tampering & Platform-assigned sequence numbers, append-only events, hash chain, independent export & Compromise of a root of trust or signing key\\
+  Sandbox escape and resource abuse & Micro-VMs, hard resource limits, image scanning, destruction on expiry & Zero-day vulnerabilities and covert channels\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+The ``confused deputy'' is this: an agent legitimately holds read permission on tool A and outbound-send permission on tool B; induced by an injected instruction, it sends what it read through A out through B. Every step is within its permissions; the combination is a leak. The industry has not fully solved this. The paper reduces it through risk tiers and dual sign-off on dangerous combinations, but does not claim to eliminate it.
+
+The paper does not claim to eliminate covert channels such as DNS, timing or power, nor does it cover the model-weight supply chain, chip-level side channels, or compromise of the enterprise identity provider itself. Those risks fall to infrastructure security, vendor management and the organization's zero-trust program.
+
+% =============================================================================
+\section{Identity and Authorization}
+\label{sec:iam}
+
+The agent is a first-class principal. Everything in this section follows from that decision: who the principals are, how permissions intersect, how tokens are separated, and how credentials are kept out of reach.
+
+\subsection{Four kinds of principal}
+
+The platform recognises four kinds of principal (Table~\ref{tab:principals}). The first three are ``who is making the call''; the fourth is ``the unit being called''. Treating the agent as an independent principal is the starting point of the whole identity design: it borrows neither a developer's account nor a machine's, and it has its own ID, owner and lifecycle.
+
+\begin{table}[htbp]
+\centering
+\caption{Four kinds of principal}
+\label{tab:principals}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.9cm}L{4.0cm}L{3.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Principal} & \textbf{Origin} & \textbf{Mode of action} & \textbf{Upper bound on permission}\\
+  \midrule
+  User & An end user, delegated through a business system & On behalf of (OBO) & The user's own permissions\\
+  Service & A business system or back-end service & As a service & The service account's permissions\\
+  Scheduler & A scheduled or event trigger & As itself & No user bound; the task's creator is recorded\\
+  Agent & The hosted execution unit & Determined by the caller's mode & Constrained jointly by the manifest, grants and structural denials\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+The scheduler is the principal that is easiest to overlook. When a scheduled task fires there is no ``current user''---so what bounds its permissions? The rule here: a scheduled task runs as the agent itself, its upper bound is the intersection of the manifest and the grants, and the task's creator is recorded for accountability; before each firing the platform checks that the creator is still employed and the agent is not disabled; when the creator leaves, their scheduled tasks are frozen together with the agent and sent for review. The rule prevents ``automation nobody owns'' from running indefinitely.
+
+Every agent must have a human owner; an owner leaving triggers a review of their agents. The registry entry is the agent's identity blueprint, and the agent itself holds no long-lived credential.
+
+\subsection{The permission-intersection rule}
+
+Whether one tool call may proceed is decided by the following intersection:
+
+\[
+  P_{\text{effective}}
+  =
+  P_{\text{manifest}}
+  \cap P_{\text{grant}}
+  \cap
+  \begin{cases}
+    P_{\text{user}}, & \text{on behalf of a user}\\
+    P_{\text{service}}, & \text{as a service}\\
+    \Omega, & \text{as itself (scheduler)}
+  \end{cases}
+  \setminus P_{\text{deny}}
+\]
+
+Read it as: what the agent declared it could use, intersected with what an administrator granted it, intersected with what the initiator is entitled to do (a scheduler has no ``own'' permissions, so that term is the universal set $\Omega$ and narrows nothing), minus the structural denials. Three intersections mean that any party can only narrow permissions, never widen them: an agent acting for a user never exceeds that user's own permissions, and an agent granted a tool cannot use it if its manifest does not declare it.
+
+Structural denials are a list of operations that are never available to agent principals (modifying one's own permissions, cross-tenant access, and the like). They do not live in policy configuration; at the identity layer there is simply no path by which they can be granted.
+
+Every event carries the complete identity chain: tenant, agent, version, session, mode of action, on whose behalf, and approver. Following that chain, an auditor can answer ``who did this, on whose behalf, and with whose approval''.
+
+\subsection{Two classes of token, each for its own interface}
+
+The platform issues two classes of token, each usable only against one class of interface (Table~\ref{tab:tokens}, Figure~\ref{fig:tokens}).
+
+\begin{table}[htbp]
+\centering
+\caption{The two token classes}
+\label{tab:tokens}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.4cm}L{5.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Token} & \textbf{Interface and holder} & \textbf{Restrictions}\\
+  \midrule
+  Platform token & The unified API; held by people, CI and business services & Cannot reach the model gateway, the tool gateway, the checkpoint store or any other runtime exit\\
+  Run token & The model gateway, the tool gateway, checkpoints, artifacts; held by a running container & Bound to one run, valid for minutes, restricted to the runtime network; cannot reach the unified API\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.9\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  who/.style={rounded corners=3pt,draw=Rule,fill=SoftGray,minimum width=3.4cm,minimum height=10mm,align=center,line width=.7pt,text width=3.1cm},
+  tok/.style={rounded corners=3pt,minimum width=3.0cm,minimum height=10mm,align=center,line width=.8pt,text width=2.8cm},
+  dst/.style={rounded corners=3pt,minimum width=3.8cm,minimum height=10mm,align=center,line width=.7pt,text width=3.5cm},
+  ok/.style={-{Stealth[length=2mm]},line width=.85pt,color=GreenDark},
+  no/.style={-{Stealth[length=2mm]},line width=.85pt,color=Rust,dashed}
+]
+  \node[who] (people) {People / CI / business services};
+  \node[tok,draw=Primary,fill=PrimaryLight,right=10mm of people] (ptoken) {\textbf{Platform token}};
+  \node[dst,draw=Primary,fill=PrimaryLight,right=10mm of ptoken] (l1) {Unified API (management and invocation)};
+
+  \node[who,below=14mm of people] (container) {Running container};
+  \node[tok,draw=Green,fill=GreenLight,right=10mm of container] (rtoken) {\textbf{Run token}\\bound to one run};
+  \node[dst,draw=Green,fill=GreenLight,right=10mm of rtoken] (gw) {Model and tool gateways, checkpoints, artifacts};
+
+  \draw[ok] (people) -- (ptoken);
+  \draw[ok] (ptoken) -- (l1);
+  \draw[ok] (container) -- (rtoken);
+  \draw[ok] (rtoken) -- (gw);
+  \coordinate (x1) at ($(ptoken.south east)!0.38!(gw.north west)$);
+  \coordinate (x2) at ($(rtoken.north east)!0.38!(l1.south west)$);
+  \draw[no,-] (ptoken.south east) -- (x1);
+  \draw[no,-] (rtoken.north east) -- (x2);
+  \node[font=\sffamily\bfseries\small,text=Rust,inner sep=0pt] at (x1) {$\times$};
+  \node[font=\sffamily\bfseries\small,text=Rust,inner sep=0pt] at (x2) {$\times$};
+  \node[font=\sffamily\tiny,text=Rust,anchor=west,inner sep=1pt] at ([xshift=1.5mm]x1) {a platform token cannot reach the runtime exits};
+  \node[font=\sffamily\tiny,text=Rust,anchor=west,inner sep=1pt] at ([xshift=1.5mm]x2) {a run token cannot reach the unified API};
+\end{tikzpicture}%
+}
+\caption[Two token classes]{Two token classes, each on its own path: crossing over is always rejected}
+\label{fig:tokens}
+\end{figure}
+
+The design separates ``the right to manage the platform'' from ``the right to act on behalf of one run'' structurally. Code inside a container that holds its own run token cannot use it to call the management API and change authorizations; an administrator's token cannot impersonate a run and call a tool. Leaking either class of token does not directly yield the capabilities of the other.
+
+\subsection{Delegation must be verifiable}
+
+When a business system calls on behalf of a user, it tells the platform ``I represent user U''. If that is merely a string in the request, any business system can impersonate any user, and the permission intersection and audit attribution above become meaningless. The proposal therefore requires that ``on whose behalf'' be a token issued by the enterprise identity provider and verified by the platform, or the product of a token exchange performed by the platform itself. A bare user ID in a request header never enters the identity chain.
+
+\subsection{Tool risk tiers}
+
+The tool gateway keeps a four-tier risk dictionary: read internal data, write internal data, send externally, and high-risk write. The tiers serve two immediate purposes: Q\&A agents may not receive outbound-send tools by default; and granting an agent both ``read sensitive data'' and ``send externally'' requires two signatures and is flagged in audit. This is the mitigation for the confused-deputy risk described above.
+
+\subsection{The credential vault}
+
+The secrets that tools need (API keys, account passwords) are kept in the credential vault, which follows three rules:
+
+\begin{enumerate}
+  \item People may write, rotate and revoke credentials, but never read them in plaintext.
+  \item The plaintext read path is open only to the tool gateway's service identity, and on the network the vault is reachable only from the tool gateway.
+  \item Secrets never enter the model's context and never appear in tool results, logs or snapshots.
+\end{enumerate}
+
+Figure~\ref{fig:credential} shows how a credential moves during one tool call: the agent declares a tool call, the gateway checks authorization, fetches the credential briefly from the vault, calls the target system on the agent's behalf, and returns the result. From beginning to end the agent sees only the tool's name and its result.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.97\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  box/.style={rounded corners=3pt,minimum width=2.9cm,minimum height=11mm,align=center,line width=.7pt,text width=2.7cm},
+  arrow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted},
+  stepbadge/.style={circle,draw=Primary,fill=white,minimum size=4.8mm,inner sep=0pt,
+                    font=\sffamily\bfseries\tiny,text=PrimaryDark,line width=.65pt}
+]
+  \node[box,draw=Gold,fill=GoldLight] (agent) {Agent container\\holds only a run token};
+  \node[box,draw=Green,fill=GreenLight,right=9mm of agent] (gw) {Tool gateway\\checks permission, idempotency, risk};
+  \node[box,draw=Primary,fill=PrimaryLight,above right=9mm and 9mm of gw] (vault) {Credential vault\\unreadable by people};
+  \node[box,draw=Rust,fill=RustLight,below right=9mm and 9mm of gw] (target) {Target system\\(internal or external)};
+  \node[box,draw=Gold,fill=GoldLight,right=44mm of gw] (ledger) {Event ledger\\authoritative tool-call record};
+
+  \draw[arrow] (agent) -- node[stepbadge,above=0.5mm]{1} (gw);
+  \draw[arrow] (gw) -- node[stepbadge,pos=.5]{2} (vault);
+  \draw[arrow] (gw) -- node[stepbadge,pos=.5]{3} (target);
+  \draw[arrow] (gw) -- node[stepbadge,pos=.5]{4} (ledger);
+  \draw[arrow] (gw.south) -- ++(0,-7mm) -| node[stepbadge,pos=.25]{5} (agent.south);
+\end{tikzpicture}%
+}
+\par\smallskip
+{\scriptsize\color{Muted}
+  \textbf{1} declare a tool call\quad
+  \textbf{2} fetch the credential briefly\quad
+  \textbf{3} call the target system on the agent's behalf\quad
+  \textbf{4} record the authoritative event\quad
+  \textbf{5} return only the result to the agent\par}
+\caption[Credential flow in a tool call]{Credential flow during one tool call: the credential appears briefly at the tool gateway and never enters the container}
+\label{fig:credential}
+\end{figure}
+
+% =============================================================================
+\section{Shared Services: The Governed Exits}
+\label{sec:shared}
+
+\subsection{Why single exits}
+
+Everything an agent does to the outside world happens in three kinds of action: calling a model, calling a tool, executing code. If those actions could leave the container directly, the platform would neither know they happened nor be able to stop them. The shared-services layer gives each of the three exactly one path, with the platform's checks, records and refusals on that path. This layer runs in the opposite direction to the entry layer: the entry layer is the outside calling the platform; shared services are running agents calling enterprise capabilities.
+
+Figure~\ref{fig:zoom-shared} shows the shared-services region of the complete architecture: four modules, two of which reuse the enterprise's existing gateways and two of which are built in-house.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm,zoom/.append style={minimum height=18mm}]
+\node[open,text width=2.9cm,minimum height=10mm] (ag) {Running agent\\{\scriptsize holds only a run token}};
+\node[reuse,zoom,below left=8mm and 2.7cm of ag.south] (s1) {\zc{Model gateway}{Allow-list, budget, metering, data classification, blocklist}};
+\node[reuse,zoom,right=of s1] (s2) {\zc{Tool gateway}{Permission intersection, idempotency ledger, authoritative events, risk tiers}};
+\node[own,zoom,right=of s2] (s3) {\zc{Credential vault}{Unreadable by people; fetched briefly by the tool gateway only}};
+\node[own,zoom,right=of s3] (s4) {\zc{Sandbox service}{Lazy creation, reuse, destroy on completion, controlled egress}};
+\draw[aflow] (ag.south) -- (s1.north);
+\draw[aflow] (ag.south) -- (s2.north);
+\draw[aflow] (s2.north east) -- (s3.north west);
+\draw[aflow] (s2.south east) -- (s4.south west);
+\begin{scope}[on background layer]\node[band,draw=Primary!55!white,fit=(s1)(s4)] {};\end{scope}
+\end{tikzpicture}
+\caption[The shared-services layer]{The four shared-services modules: the agent touches only the two gateways; the credential vault and the sandbox service are called by the tool gateway on its behalf}
+\label{fig:zoom-shared}
+\end{figure}
+
+\subsection{The model gateway}
+
+The model gateway is the only exit for every large-model call. It is responsible for the model allow-list, the usage budget (exhaustion ends the run in the ``budget exceeded'' state), per-call metering, routing among models, the mapping from data classification to permitted models (tenants handling sensitive data may use only designated model domains), and the agent blocklist (the second stage of the kill switch). Phase~1 provides at least one global default rule for data classification; finer-grained data-loss prevention comes in Phase~2. A cloud vendor's own model gateway does not enter the authoritative chain, because it holds the decision over which model may be used and it hosts the model keys.
+
+\subsection{The tool gateway}
+
+The tool gateway is the only exit for every tool call and the source of the authoritative tool-call events. ``Tool gateway'' is the unified name in this document; some interfaces retain the earlier name Tool Hub (for example the environment variable \code{TOOL_HUB_URL}) as a compatibility alias.
+
+Tools fall into four classes, of which only the last needs a sandbox:
+
+\begin{enumerate}
+  \item \textbf{Skill descriptions.} Capability descriptions loaded as text into the agent's context; no external call is involved.
+  \item \textbf{API tools.} Direct calls to a target business service.
+  \item \textbf{MCP tools.} Provided by an independent tool-server container through the Model Context Protocol.
+  \item \textbf{Environment-interaction tools.} Executing code, running commands, driving a browser or a desktop. These need an isolated, ephemeral environment.
+\end{enumerate}
+
+The call path for environment-interaction tools is shown in Figure~\ref{fig:tool-chain}: the agent calls the tool gateway, the gateway calls the platform's sandbox service, and the sandbox service asks the vendor for an isolated environment through the cloud adapter. Even between the platform's own components, the call goes through the platform's abstraction rather than straight to the vendor.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.97\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  box/.style={rounded corners=3pt,minimum width=2.8cm,minimum height=10mm,align=center,line width=.7pt,text width=2.6cm},
+  arrow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted}
+]
+  \node[box,draw=Gold,fill=GoldLight] (a) {Agent};
+  \node[box,draw=Green,fill=GreenLight,right=6mm of a] (b) {Tool gateway};
+  \node[box,draw=Primary,fill=PrimaryLight,right=6mm of b] (c) {Platform sandbox service\\lazy create / reuse / destroy};
+  \node[box,draw=Primary,fill=PrimaryLight,right=6mm of c] (d) {Cloud adapter};
+  \node[box,draw=Rust,fill=RustLight,right=6mm of d] (e) {Vendor sandbox};
+  \draw[arrow] (a) -- (b);
+  \draw[arrow] (b) -- (c);
+  \draw[arrow] (c) -- (d);
+  \draw[arrow] (d) -- (e);
+\end{tikzpicture}%
+}
+\caption[Call path for environment tools]{Call path for environment-interaction tools: platform components call each other through the platform's own abstraction, never straight to the vendor}
+\label{fig:tool-chain}
+\end{figure}
+
+Phase~1 adds to the enterprise's existing tool gateway: routing by the four tool classes, injecting the gateway address into containers, the idempotency ledger, the agent blocklist, and a minimal risk dictionary.
+
+\subsection{The sandbox service}
+
+The sandbox service is a lightweight component built in-house that manages the lifecycle of isolated environments: create only when needed, reuse within a session, destroy on completion, and converge egress onto a controlled exit. It is exposed through its own \code{/v1/sandboxes} interface; the tool gateway is only one of its consumers, and tenants can request a sandbox directly to execute code. Credentials never enter a sandbox; when code in a sandbox needs a protected resource, the call still goes through the tool gateway.
+
+\subsection{A statement of the trust boundary}
+
+The SDK inside a container, the autonomous-agent shim and the events an agent reports about itself are not roots of trust. The security boundary is formed jointly by the enterprise's gateways, the controlled network exit, short-lived identity, sandbox isolation and the enterprise-held ledger.
+
+% =============================================================================
+\section{The Unified Ledger, Metering and Observability}
+\label{sec:ledger}
+
+\subsection{What the ledger is}
+
+The unified ledger is an append-only record of events held by the enterprise. Every run, every tool call, every policy decision and every administrative action is written as an event with a sequence number and an identity chain. It serves three consumers at once: the user interface reads event streams from it, audit replays chains of responsibility from it, and metering computes cost from it. Because all three consume the same data, they never disagree.
+
+\subsection{Each class of fact has its own authoritative source}
+
+The same event stream can be consumed by many parties, but each class of usage data must respect its own authoritative source (Table~\ref{tab:facts}). The principle underneath: data reported by a container about itself is supplementary only, never the basis for billing or audit.
+
+\begin{table}[htbp]
+\centering
+\caption{Authoritative sources of each class of fact}
+\label{tab:facts}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.2cm}L{4.6cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Fact} & \textbf{Authoritative source} & \textbf{Reason}\\
+  \midrule
+  Model usage & The model gateway & It holds the real request and response counts\\
+  Tool calls and side effects & The tool gateway & It sits at the exit for authorization, idempotency and external calls\\
+  Runtime busy time & The vendor's bill & It determines what the enterprise actually pays\\
+  Sandbox duration & The platform sandbox service plus the vendor & The platform holds the request semantics, the vendor holds the resource bill\\
+  Container self-reports & Supplementary only & A container is not a trusted source for metering or audit\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Three books of metering}
+
+Metering keeps three books (Figure~\ref{fig:three-books}): the internal allocation book answers which tenant, agent and run should bear what cost; the vendor book is what the enterprise actually pays to model, cloud and tool vendors; the reconciliation book explains the differences between the two, unallocated costs and estimation error. All three are computed from the same event stream.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.86\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  src/.style={rounded corners=3pt,draw=Green,fill=GreenLight,minimum width=3.0cm,minimum height=9mm,align=center,line width=.7pt,text width=2.8cm},
+  book/.style={rounded corners=3pt,minimum width=3.6cm,minimum height=12mm,align=center,line width=.8pt,text width=3.3cm},
+  arrow/.style={-{Stealth[length=2mm]},line width=.75pt,color=Muted}
+]
+  \node[src] (m) {Model gateway metering};
+  \node[src,below=3mm of m] (t) {Tool gateway ledger};
+  \node[src,below=3mm of t] (r) {Vendor bill};
+  \node[src,below=3mm of r] (s) {Sandbox service records};
+  \node[rounded corners=3pt,draw=Gold,fill=GoldLight,minimum height=48mm,minimum width=2.9cm,align=center,line width=.8pt,right=12mm of t.south east,anchor=west,yshift=1.5mm,text width=2.6cm] (ledger) {Unified\\event ledger};
+  \node[book,draw=Primary,fill=PrimaryLight,right=12mm of ledger.east,yshift=16mm] (b1) {\textbf{Internal allocation book}\\what tenant, agent and run each bear};
+  \node[book,draw=Rust,fill=RustLight,right=12mm of ledger.east] (b2) {\textbf{Vendor book}\\what the enterprise actually pays};
+  \node[book,draw=Gold,fill=GoldLight,right=12mm of ledger.east,yshift=-16mm] (b3) {\textbf{Reconciliation book}\\differences, unallocated cost, error};
+  \draw[arrow] (m.east) -- (ledger.west |- m.east);
+  \draw[arrow] (t.east) -- (ledger.west |- t.east);
+  \draw[arrow] (r.east) -- (ledger.west |- r.east);
+  \draw[arrow] (s.east) -- (ledger.west |- s.east);
+  \draw[arrow] (ledger.east) -- (b1.west);
+  \draw[arrow] (ledger.east) -- (b2.west);
+  \draw[arrow] (ledger.east) -- (b3.west);
+\end{tikzpicture}%
+}
+\caption[Three books of metering]{Three books of metering, all computed from the same event stream and reconcilable against each other}
+\label{fig:three-books}
+\end{figure}
+
+Two implementation requirements follow. First, the circuit breaker's spend ceiling and the metering estimate must use the same counter; otherwise the budget system may believe the ceiling has not been reached while the task engine keeps running. Second, reconciliation granularity depends on the vendor: if the vendor's bill supports tags per session or instance, reconciliation is per run; if not, it can only be per tenant, and the documentation must say so rather than overstate.
+
+The cost of the shared Q\&A pool is allocated to tenants by their share of active time:
+
+\[
+  C_{\text{tenant, pool}}
+  =
+  C_{\text{pool, busy}}
+  \times
+  \frac{T_{\text{tenant, active}}}{\sum_i T_{i,\,\text{active}}}
+\]
+
+The full cost of one run has seven components:
+
+\[
+  C_{\text{run}}
+  = C_{\text{model}}
+  + C_{\text{tool}}
+  + C_{\text{runtime}}
+  + C_{\text{sandbox}}
+  + C_{\text{storage}}
+  + C_{\text{network}}
+  + C_{\text{platform}}
+\]
+
+\subsection{Operating metrics}
+
+As a reference architecture, the paper sets no success-rate, latency or availability targets that have not been measured. After implementation, at least six metrics should be tracked together: the number of production runs completed successfully, cost per run, policy denial rate, audit event completeness, human takeover rate, and the difference against vendor bills. Formal service-level targets should be set by business tier only after capacity tests, failure drills and verification of vendor capabilities. ``How many agents are onboarded'' or ``how many calls were made'' on their own hide failures, privilege violations and waste.
+
+\subsection{Three layers of observability}
+
+Observability has three layers, built in three different ways:
+
+\begin{enumerate}
+  \item \textbf{Instrumentation.} Platform code uses the OpenTelemetry open standard throughout; every tool call is a span, and the trace identifier propagates end to end. Instrumentation lives in the enterprise's own code and is done once.
+  \item \textbf{Collection.} A container's standard output and error streams go first to the platform's collector, are redacted, and only then are forwarded to the observability backend; the vendor's native log retention is set to the minimum or switched off. This keeps prompts and user data from lingering as logs on the vendor's side.
+  \item \textbf{Dashboards.} In Phase~1 the cloud vendor's observability backend may be rented, because the instrumentation follows an open standard and switching means changing a destination address; tenants, however, view their own traces only through the platform, never directly in the vendor's dashboard.
+\end{enumerate}
+
+Trace attributes default to an allow-list: prompts, model output and sensitive tool parameters do not enter dashboards. Monitoring answers ``is the machine healthy''; the ledger answers ``who did what''. Accountability always rests on the enterprise ledger.
+
+\subsection{Tamper evidence and compliant deletion}
+
+The ledger is append-only. Each event includes the hash of the previous event, forming a hash chain; the chain's daily digest is anchored to versioned-locked or write-once storage. Altering any historical event breaks the chain check, which is the technical basis on which auditors can rely on the ledger.
+
+Compliant deletion (a user exercising a right to erasure, for example) looks incompatible with an append-only ledger. The resolution is per-thread encryption: each thread's event bodies are encrypted under their own key; deletion destroys the key, making the bodies unreadable while the sequence, types and audit structure of the events remain intact.
+
+% =============================================================================
+\section{The Authoritative Store}
+\label{sec:storage}
+
+\subsection{One logical database, semantics first}
+
+Phase~1 uses one logical PostgreSQL database for the event ledger, checkpoints, the registry, and the mapping between threads and sessions. The point is to freeze one consistent data semantics first, not to pack every workload into one database forever. When events are later moved to a message queue, analytics to a columnar store and checkpoints to dedicated storage, no contract above them needs to change.
+
+Figure~\ref{fig:zoom-storage} shows the four classes of data this logical database holds. What they have in common is authority: any module that needs to answer ``what really happened'' consults this store.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm,zoom/.append style={minimum height=15mm}]
+\node[open,zoom] (g1) {\zc{Event ledger}{Platform-assigned sequence; append-only; hash chain}};
+\node[open,zoom,right=of g1] (g2) {\zc{Checkpoints}{Recovery points of a run; with expiry}};
+\node[open,zoom,right=of g2] (g3) {\zc{Registry}{Agents, versions, manifests, grants}};
+\node[open,zoom,right=of g3] (g4) {\zc{Session map}{Correspondence of threads to sessions}};
+\node[bandnote,below=2.5mm of g1.south west,anchor=north west,text width=13.8cm,align=left] (gn) {One logical PostgreSQL: primary–standby, encryption at rest, point-in-time recovery, off-site backups; later splitting into dedicated stores changes no contract above};
+\begin{scope}[on background layer]\node[band,fit=(g1)(g4)(gn)] {};\end{scope}
+\end{tikzpicture}
+\caption[The authoritative store]{The four classes of data in the authoritative store (the storage region of the complete architecture)}
+\label{fig:zoom-storage}
+\end{figure}
+
+\subsection{Capacity and write amplification}
+
+Output fragments (\code{message.delta}) are the main source of write amplification. A rough estimate: at a peak of 2,000 conversations per hour with about 100 fragments each, that is 200,000 rows per hour and close to 150 million rows in 30 days; add checkpoints of several hundred kilobytes per step for long tasks, and a single database is exhausted by capacity before performance. Phase~1 should therefore adopt from the start:
+
+\begin{itemize}
+  \item Output fragments go to a short-retention stream table, kept for 7 days by default.
+  \item When a run completes, its fragments are merged into long-retention message events.
+  \item Checkpoints are retained for 7 days by default, shortened to 24 hours once the run completes.
+  \item Large objects are referenced in object storage, never inlined in the database.
+  \item The database runs primary–standby with encryption at rest, point-in-time recovery and daily off-site backups.
+\end{itemize}
+
+Recovery objectives must be set after capacity tests, backup restores, regional failure drills and vendor-outage rehearsals. The paper pre-fills no unverified recovery-point or recovery-time targets.
+
+% =============================================================================
+\section{The Execution Plane and the Vendor Boundary}
+\label{sec:execplane}
+
+This section corresponds to the bottom two layers of the complete architecture (Figure~\ref{fig:zoom-exec}): in the execution plane the shells and the adapter are the platform's own and the machines on the two product lines are rented; the cloud resources below are rented entirely by usage. A single dividing line explains both layers---vendor names appear only at the very bottom, and nothing in the execution plane depends directly on any one vendor.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[node distance=2.2mm]
+\node[own,zoom] (x1) {\zc{Cloud adapter}{Five primitives; vendor dialects abstracted here}};
+\node[own,zoom,right=of x1] (x2) {\zc{Multi-cloud scheduler}{Capability matrix, canary probes, cross-cloud replay}};
+\node[bandtitle,text=RustDark,below=4mm of x1.south west,anchor=north west] (tR) {Runtime line · managed execution · busy/idle billing};
+\node[own,text width=2.9cm,minimum height=11mm,below=1.5mm of tR.south west,anchor=north west] (r1) {\zc{T0 harness pool}{shared, stateless}};
+\node[own,text width=2.9cm,minimum height=11mm,right=of r1] (r2) {\zc{T2 SDK shell}{dedicated container}};
+\node[own,text width=2.9cm,minimum height=11mm,right=of r2] (r3) {\zc{T1 workflow executor}{declarative workflows}};
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tR)(r1)(r3)] (BR) {};\end{scope}
+\node[bandtitle,text=RustDark,anchor=north west] (tS) at ($(BR.north east |- tR.north west)+(3mm,0)$) {Sandbox line · ephemeral isolated compute};
+\node[rent,text width=2.9cm,minimum height=11mm,below=1.5mm of tS.south west,anchor=north west] (b1) {\zc{Tool-level sandbox}{destroyed on completion}};
+\node[own,text width=2.9cm,minimum height=11mm,right=of b1] (b2) {\zc{T3 full VM}{full-machine isolation + shim}};
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tS)(b1)(b2)] (BS) {};\end{scope}
+\begin{pgfonlayer}{deep}\node[frame,draw=Rust,fill=Rust!4,fit=(x1)(x2)(BR)(BS)] (FX) {};\end{pgfonlayer}
+\node[bandtitle,text=RustDark,anchor=north west] (tY) at ([yshift=-4mm]FX.south west) {Cloud resources · rented by usage, replaceable at any time};
+\node[rent,text width=2.9cm,minimum height=11mm,below=1.5mm of tY.south west,anchor=north west] (y1) {\zc{Cloud A · runtime}{scaling, busy/idle billing, session affinity}};
+\node[rent,text width=2.9cm,minimum height=11mm,right=of y1] (y2) {\zc{Cloud A · sandbox}{isolated micro-VMs}};
+\node[rent,text width=2.9cm,minimum height=11mm,right=of y2] (y3) {\zc{Observability backend}{open-standard backend}};
+\node[rent,text width=2.9cm,minimum height=11mm,right=of y3] (y4) {\zc{Object storage}{files and artifacts}};
+\node[rent,text width=2.9cm,minimum height=11mm,right=of y4] (y5) {\zc{Cloud B · standby}{multi-cloud resilience}};
+\begin{scope}[on background layer]\node[band,draw=Rust!60!white,dashed,fit=(tY)(y1)(y5)] {};\end{scope}
+\end{tikzpicture}%
+}
+\caption[Execution plane and cloud resources]{The execution plane and the cloud resources (the bottom two layers of the complete architecture)}
+\label{fig:zoom-exec}
+\end{figure}
+
+\subsection{The cloud adapter: five primitives}
+
+The platform uses cloud resources through exactly five primitives: deploy, invoke, cancel, status, destroy. No other part of the platform depends directly on a specific vendor. The shape of those five primitives \emph{is} the reservation for multi-cloud: switching vendors means implementing one new adapter.
+
+Three capabilities that the vendor's runtime provides must nonetheless be abstracted inside the adapter: session affinity, traffic switching and busy/idle reporting. They are each vendor's ``dialect''---their semantics differ from vendor to vendor---and letting them reach the task engine would create hidden rework when the vendor changes.
+
+\subsection{Liveness probes and the authoritative busy/idle judgment}
+
+The container's \code{/ping} means only ``still alive''. The authoritative busy/idle judgment comes from the task engine: does this session have an unfinished run? The cloud adapter reports busy or idle to the vendor on that basis. The design has two purposes: to stop a container from reporting ``busy'' forever so that the vendor never reclaims it (idle billing), or reporting ``idle'' so that the vendor reclaims an instance mid-run; and to guarantee honest idle reporting, which is the precondition for the vendor's busy/idle billing to actually save money. The maximum run duration in the manifest is enforced by a platform timer: on expiry the platform sends cancel, and after a grace period destroys the instance, without relying on the container's cooperation.
+
+\subsection{The two product lines}
+
+The execution plane rents exactly two product lines (Table~\ref{tab:lines}). Vendor names label only the source of the rental; they are not components of the execution plane.
+
+\begin{table}[htbp]
+\centering
+\caption{The two product lines of the execution plane}
+\label{tab:lines}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.4cm}L{6.0cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Product line} & \textbf{What runs on it} & \textbf{Billing and isolation}\\
+  \midrule
+  Runtime & The Q\&A harness pool, the code-agent SDK shell, the workflow executor & Managed long-running execution, billed by busy/idle time\\
+  Sandbox & Tool-level code and browser execution, the autonomous agent's full VM & Ephemeral compute, billed per use or per hour, destroyed on completion\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Three verdicts on vendor capabilities}
+
+Measured against the three criteria of Section~\ref{sec:method} (no decision rights, no authoritative data, a standard exit), a vendor's complete product line sorts into three verdicts (Table~\ref{tab:vendor}).
+
+\begin{table}[htbp]
+\centering
+\caption{Three verdicts on vendor components}
+\label{tab:vendor}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.9cm}L{5.9cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Verdict} & \textbf{Components} & \textbf{Reason}\\
+  \midrule
+  Use & Runtime, sandbox, object storage, read-only observability backend & Mechanical resources with no final decision rights; observability follows an open standard and is replaceable\\
+  Do not use & Cloud model and tool gateways, credential hosting, identity service, knowledge base, memory service, low-code platforms, hosted guardrails & They hold decision rights, secrets or authoritative data, creating deep lock-in\\
+  Candidate & A second vendor's runtime, specialized sandbox products & Enter through the adapter and the capability matrix, without changing the contract above\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Procurement veto items}
+
+Vendor verification covers at least six items: instance-level or network-level egress convergence, session affinity, VM snapshots, billing tag granularity, whether native logs can be disabled or shortened, and whether busy/idle semantics can be aligned with the platform's judgment. Any item that affects the ten invariants or the ability to leave should be a procurement veto, not an engineering patch after launch.
+
+\subsection{Multi-cloud is not double deployment}
+
+The Phase~2 multi-cloud scheduler is responsible for the capability matrix, canary probes, circuit-breaking rerouting and cross-cloud replay. The rule is ``one session stays with one vendor for its lifetime'', so that in-memory state is never shared across clouds; resilience relies on enterprise-held checkpoints, artifacts and the ledger---recreate the session on another cloud and replay from the archive---rather than on maintaining an expensive hot–hot pair.

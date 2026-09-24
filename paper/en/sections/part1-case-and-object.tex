@@ -1,0 +1,474 @@
+% =============================================================================
+\whitepaperpart{I}{The Case and the Object}
+{Why the platform should exist, what exactly it hosts, and how the four kinds of agent are told apart.}
+
+% =============================================================================
+\section{Executive Summary}
+\label{sec:exec}
+
+An enterprise agent platform has to answer five questions: \textbf{who may run, what may they do, what did they do, what did it cost, and how is an incident reconstructed}. The five questions map onto four properties of the platform: controllable, meterable, observable, auditable. Everything in this paper exists so that those four properties hold inside the enterprise's own boundary.
+
+A cloud vendor's agent runtime delivers requests into containers, keeps instances alive, scales them, and bills by ``busy'' versus ``idle'' time. It does these things well. What it does not know is who the agent in that container is, on whose behalf it acts, which systems it may touch, whose budget the run belongs to, or what happened inside. The vendor manages containers, not agents. Buying a vendor's complete agent product line therefore does not close the enterprise's governance gap by itself; it may instead lock identity, policy, secrets and history into that vendor.
+
+The proposal rests on six judgments:
+
+\begin{enumerate}
+  \item \textbf{The enterprise owns the control plane.} Registration, identity, authorization, task state, the ledger and the cloud adapter are long-term control points and cannot be outsourced.
+  \item \textbf{The execution plane is rented by usage.} Machines, sandboxes, object storage and read-only dashboards hold no decision rights; any vendor that meets the contract can supply them.
+  \item \textbf{The platform binds to a protocol, not to a framework.} A new agent framework joins through an adapter; the contract between platform and container does not change.
+  \item \textbf{Capability is declared and then proven.} An agent's capability manifest is an application; it takes effect only after a conformance test.
+  \item \textbf{Every side effect passes through a governed exit.} Calling a model, calling a tool, executing code---there is no path around the platform.
+  \item \textbf{Every fact goes into one ledger.} Administrator actions and agent actions share one identity chain, one event sequence and one set of audit rules.
+\end{enumerate}
+
+In one sentence: an enterprise-owned control plane decides an agent's identity, version, capability and accountability; a minimal protocol connects replaceable cloud execution resources; governed exits constrain every external action; and one ledger holds every authoritative fact.
+
+What the enterprise gets are four things that are hard to obtain together by any other means. \emph{Fast onboarding}: an existing agent joins with a handful of changed lines, and a question-answering agent goes live from a prompt. \emph{Affordable operation}: machines are rented by usage, waiting costs nothing, and every run has a hard ceiling. \emph{Real control}: every external action passes an exit that can record and refuse it, and credentials never enter the agent. \emph{Accountability}: any run can be replayed back to a specific person, a specific authorization and a specific cost, and none of that history is lost when the cloud vendor changes.
+
+Phase~1 delivers only two kinds of agent (Q\&A and code), a single cloud vendor, scheduled triggers and a basic console. A few things must nevertheless be right on day one, because fixing them later means rewriting every agent already in production: the event format of the container contract, the ownership of authoritative state, the single exits for models and tools, the hard ceiling on every run, the two kinds of idempotency, the separation of tokens by interface, the verification of user identity, a kill switch that works when the vendor is unreachable, and the ledger's hash chain. Workflow agents, interrupt and resume, human approval, long-term memory, multi-cloud and autonomous agents follow in Phases 2 and 3, once the contract is stable.
+
+The document is organized as follows. Part~I answers why the platform exists, what it hosts and which principles it follows, and relates the proposal to existing industry work. Part~II is the architecture and runtime contract: the overall structure, capability manifests and admission, the three interface layers, one request end to end, runtime semantics, reliability and safety controls, and how each of the four agent kinds fulfills the contract. Part~III covers security and governance: the threat model, identity and authorization, the governed exits, the unified ledger, the authoritative store, and the boundary with cloud vendors. Part~IV discusses productization and delivery: integration with enterprise systems and generalization, phased delivery and acceptance, key decisions and residual risks. The appendices provide a glossary, a contract quick reference and an acceptance checklist.
+
+% =============================================================================
+\section{Problem Definition: Not a Shortage of Containers}
+\label{sec:problem}
+
+\subsection{How agents differ from ordinary services}
+
+An ordinary API service has a fixed path. A request arrives, follows a predetermined branch of code, calls predetermined downstream systems, and consumes roughly predictable resources. An agent does not. It decides its next step from context: which model to use, which tool to call, whether to run a piece of code, whether to stop and ask a person. The same agent can take entirely different paths on different inputs.
+
+That creates a new kind of risk. When an ordinary service fails, it usually gives a wrong answer. When an agent fails, it may have \emph{done} the wrong thing, under a real identity, against a real system---placed an order, sent an email, changed a record, executed a script. Governing agents therefore shifts from ``what did it say'' to ``what could it do, what did it do, and who authorized it''.
+
+\subsection{What happens when every team builds its own}
+
+If each team keeps its own secrets, chooses its own framework and deploys to its own cloud account, four kinds of fracture appear quickly:
+
+\begin{itemize}
+  \item \textbf{Identity fracture.} Machine identities, developer identities and end-user identities blur together; afterwards nobody can prove who acted on whose behalf.
+  \item \textbf{Governance fracture.} Release checks, tool authorizations, budgets and isolation policies are scattered across team code and vendor consoles, with no single point of enforcement.
+  \item \textbf{Evidence fracture.} Models, tools, runtimes and file stores each keep their own logs in their own formats with their own clocks; a complete chain of responsibility cannot be reconstructed.
+  \item \textbf{Vendor fracture.} Critical state and proprietary APIs settle into one cloud; switching vendors turns out to mean reimplementing the whole platform.
+\end{itemize}
+
+None of these fractures is fixed by buying a better runtime. They occur above the runtime, inside the enterprise's own boundary.
+
+\subsection{Why now}
+
+Three developments have turned this from a question that could wait into one that must be answered now.
+
+First, agents are moving from experiments into production. While an agent is an internal chat assistant on trial, the cost of an error is an unsatisfactory answer. Once it touches customer data, internal systems and real transactions, the cost of an error is a real side effect. The need for governance grows with the agent's reach, not with the model's ability.
+
+Second, cloud vendors have begun to offer agent infrastructure as complete product lines: runtime, sandbox, identity, gateway, memory and observability, packaged together. Each piece is useful on its own. But an enterprise that places its identities, policies, secrets and history into one vendor's product line will discover, when it wants to switch a few years later, that what needs rewriting is not one module but the whole platform. The window for deciding what to own and what to rent is now.
+
+Third, audit and compliance requirements are becoming concrete. Regulators, internal audit and risk functions are asking the same question: who authorized this automated action, on what basis, and can it be reproduced? That question cannot be answered by stitching vendor logs together after the fact. It can only be answered by a chain of responsibility designed in from the start.
+
+\subsection{What the cloud runtime does and what the enterprise still must do}
+
+Table~\ref{tab:division} places the two side by side. The left column is what a cloud runtime typically provides; the right column is what the enterprise platform remains responsible for.
+
+\begin{table}[htbp]
+\centering
+\caption{Division of responsibility between a cloud runtime and the enterprise platform}
+\label{tab:division}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.9cm}YY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Capability} & \textbf{What the cloud runtime provides} & \textbf{What the enterprise platform still owns}\\
+  \midrule
+  Compute lifecycle & Deployment, scaling, liveness probes, busy/idle billing & Which agent, which version, and why it is running\\
+  Identity & Instance or cloud-account identity & User, service, scheduler and agent identities, and the ``on whose behalf'' chain\\
+  Authorization & Cloud resource access control & Which models and tools, which data, what risk tier, which structural denials\\
+  Credentials & A secrets product or environment variables & Credentials invisible to the agent, injected per call, every retrieval recorded\\
+  State & Ephemeral container or session state & Conversation history, run progress, checkpoints, artifacts, and the authoritative mapping among them\\
+  Observability & Machine logs and resource metrics & Business events, policy decisions, cost attribution, replay of responsibility\\
+  Migration & The vendor's own export features & A stable contract, enterprise-held state, adapters, and rehearsed exit\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{thesisbox}
+  \textbf{The cloud vendor manages containers; the enterprise platform manages agents.} A container being alive does not mean the agent is allowed to act. A vendor bill being accurate does not mean the cost can be attributed to a team.
+\end{thesisbox}
+
+\subsection{What the platform delivers}
+
+The opposite of the four fractures is the platform's value. Table~\ref{tab:value} lists it by beneficiary: what each party gets, and which mechanisms in this paper provide it.
+
+\begin{table}[htbp]
+\centering
+\caption{What each stakeholder gets from the platform}
+\label{tab:value}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.9cm}YY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Stakeholder} & \textbf{What they get} & \textbf{Through which mechanisms}\\
+  \midrule
+  Business teams & A Q\&A agent goes live from a prompt; no machines, secrets or permissions to manage & Shared harness pool, capability manifest and admission, unified API\\
+  Development teams & An existing agent is hosted after a few changes, in any framework; releases are versioned and reversible & Protocol shell and framework adapters, cloud build, registry and release\\
+  Security and audit & Every external action passes a recordable, refusable exit; credentials never enter the agent; any run replays back to a person & Five action channels, credential vault, permission intersection, unified ledger with hash chain\\
+  Finance and cost control & Cost is attributed to tenant, agent and run; runaway runs have a ceiling; bills reconcile against the vendor & Three-book metering, circuit breaker, authoritative busy/idle judgment\\
+  Platform owners and management & Switching cloud vendors does not rewrite the platform; a rogue agent can be stopped without the vendor; the platform extends to other business lines & Container contract, cloud adapter, three-stage kill switch, kernel/policy-pack separation\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Goals and non-goals}
+
+Stating what the platform will not do matters as much as stating what it will. Table~\ref{tab:goals} sets the boundary.
+
+\begin{table}[htbp]
+\centering
+\caption{Goals and non-goals}
+\label{tab:goals}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.4cm}YY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  & \textbf{In scope} & \textbf{Explicitly out of scope}\\
+  \midrule
+  Platform & A complete loop from development through release, operation, governance and accountability & A universal autonomous agent that covers every scenario\\
+  Frameworks & Tenants write agents in any framework and join through the protocol & Requiring tenants to standardize on one development framework\\
+  Compute & Runtimes and sandboxes rented by usage & Building and operating a stateful compute fleet in-house\\
+  Models and tools & Single exits with unified governance and metering & Training foundation models, or replacing the enterprise's existing tool systems\\
+  Multi-cloud & Contract first, single cloud first, migration provable & Maintaining several equivalent production stacks from day one\\
+  Long-running work & Each trigger creates one bounded run & Defining a resident daemon as a new kind of agent\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+% =============================================================================
+\section{What the Platform Hosts: Agents and Their Four Kinds}
+\label{sec:agent-def}
+
+\subsection{What counts as a hostable agent}
+
+In this paper an agent is not a model, a prompt or a chat page. It is a \term{versionable software unit that can be given an identity and that, within one run, chooses models or tools from its input and context and produces a result}. Something enters the platform's hosting boundary only when it satisfies all six of the following:
+
+\begin{enumerate}
+  \item \textbf{A definition carrier.} It is defined by a prompt, a declarative workflow, source code, or a third-party process.
+  \item \textbf{A stable identity.} It has its own agent ID and does not borrow a developer's or a machine's account.
+  \item \textbf{An accountable owner.} A named human owner and a tenant, so that someone can be found when something goes wrong.
+  \item \textbf{Immutable versions.} It can be released, canaried and rolled back, and each version maps to the harness version it runs on.
+  \item \textbf{An execution boundary.} Each piece of work is a run with a start, a terminal state, a budget and the ability to be canceled.
+  \item \textbf{Operational evidence.} Its events, tool side effects, costs and artifacts can be written to the unified ledger.
+\end{enumerate}
+
+The definition says nothing about how ``intelligent'' the agent is. The model generates; the agent decides and orchestrates; the platform bounds its identity, resources, side effects and accountability. What the platform governs is a software unit that can act on behalf of a principal---not a degree of intelligence.
+
+\subsection{How the four kinds are told apart: who decides the next step}
+
+A running agent is a loop: look at the current state, decide the next step, act, look again. The four kinds are separated by a single question: \textbf{who decides the control flow of that loop?} There are exactly four possible answers---the platform's fixed loop, a workflow declared in advance, the tenant's own code, or a third-party agent's own judgment. The split is independent of model strength, business value and risk level, which is why it is complete: there is no fifth ``who decides''.
+
+One term recurs throughout the paper. The \term{harness} is the general execution loop that the platform implements itself: the code that calls models and orchestrates tools. The harness belongs to the platform; tenants submit input, receive events or declare capabilities through a stable protocol and never modify the harness.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  cardtext/.style={text width=3.55cm,align=left,inner sep=3mm,anchor=north west},
+  cardbox/.style={rounded corners=3pt,line width=.75pt},
+  axis/.style={-{Stealth[length=2mm]},line width=.9pt,color=Muted},
+  note/.style={font=\sffamily\scriptsize,color=Muted,text width=3.7cm,align=center}
+]
+  \node[cardtext] (t0) at (0,0)
+    {\textbf{\color{PrimaryDark}T0 · Q\&A}\\``Answer from the script''\\[3pt]{\scriptsize The platform's fixed loop decides each step; the tenant supplies a prompt and a tool list\\[3pt]\textcolor{GreenDark}{Fits} Q\&A, summaries, classification\\[1pt]\textcolor{RustDark}{Not for} decisions that must be deterministic}};
+  \node[cardtext] (t1) at ([xshift=4mm]t0.north east)
+    {\textbf{\color{GreenDark}T1 · Workflow}\\``Follow the form''\\[3pt]{\scriptsize A workflow declared in advance decides each step; the tenant submits a signable diagram\\[3pt]\textcolor{GreenDark}{Fits} strict-sequence checks and approvals\\[1pt]\textcolor{RustDark}{Not for} tasks whose path is not known up front}};
+  \node[cardtext] (t2) at ([xshift=4mm]t1.north east)
+    {\textbf{\color{GoldDark}T2 · Code}\\``Bring your own program''\\[3pt]{\scriptsize The tenant's own code decides each step; any framework joins through the SDK\\[3pt]\textcolor{GreenDark}{Fits} teams with developers and existing programs\\[1pt]\textcolor{RustDark}{Not for} teams without engineering capacity}};
+  \node[cardtext] (t3) at ([xshift=4mm]t2.north east)
+    {\textbf{\color{RustDark}T3 · Autonomous}\\``Let the expert work''\\[3pt]{\scriptsize A ready-made autonomous agent decides each step; the platform owns only the environment and the exits\\[3pt]\textcolor{GreenDark}{Fits} due diligence, research, exploration\\[1pt]\textcolor{RustDark}{Not for} direct high-risk actions}};
+  % Common bottom edge: the lowest of the four text blocks. Frames are drawn
+  % to this line so all four cards share one height, and the axis runs
+  % horizontally below it whatever the length of the card text.
+  \path let \p1=(t0.south), \p2=(t1.south), \p3=(t2.south), \p4=(t3.south),
+            \n1={min(\y1,\y2,\y3,\y4)} in coordinate (bot) at (0,\n1);
+  \begin{scope}[on background layer]
+    \draw[cardbox,draw=Primary,fill=PrimaryLight] (t0.north west) rectangle (t0.east |- bot);
+    \draw[cardbox,draw=Green,fill=GreenLight]     (t1.north west) rectangle (t1.east |- bot);
+    \draw[cardbox,draw=Gold,fill=GoldLight]       (t2.north west) rectangle (t2.east |- bot);
+    \draw[cardbox,draw=Rust,fill=RustLight]       (t3.north west) rectangle (t3.east |- bot);
+  \end{scope}
+  \coordinate (axL) at ($(t0.west |- bot)+(0,-7mm)$);
+  \coordinate (axR) at ($(t3.east |- bot)+(0,-7mm)$);
+  \draw[axis] (axL) -- (axR);
+  \node[note,anchor=south,text width=5cm] at ($(axL)!.2!(axR)+(0,1mm)$) {compliance guaranteed by platform code};
+  \node[note,anchor=south,text width=5cm] at ($(axL)!.8!(axR)+(0,1mm)$) {more environment autonomy};
+  \node[note,anchor=north] at ($(t0.south |- bot)+(0,-9.5mm)$) {shared pool, read-only by default};
+  \node[note,anchor=north] at ($(t1.south |- bot)+(0,-9.5mm)$) {statically analyzable, governed writes};
+  \node[note,anchor=north] at ($(t2.south |- bot)+(0,-9.5mm)$) {dedicated container, certified capability};
+  \node[note,anchor=north] at ($(t3.south |- bot)+(0,-9.5mm)$) {full-VM isolation, side effects in sandbox};
+\end{tikzpicture}%
+}
+\caption[The four kinds of agent]{T0--T3 is a spectrum of ``who decides each step'', not a ladder of capability or maturity}
+\label{fig:agent-types}
+\end{figure}
+
+Reading Figure~\ref{fig:agent-types} from left to right, the platform's grip on the loop loosens and the autonomy of the agent's environment grows. That determines what the platform can use to govern each kind: for T0 the loop is platform code, so a violation is structurally impossible; for T1 the workflow is data and can be analyzed before release; for T2 the code is a program, constrainable only from outside through isolation and single exits; for T3 even the code is not in the platform's hands, leaving full-machine isolation and controlled exits as the only levers.
+
+\subsection{What each kind is and what it is for}
+
+A short way to remember the four: \textbf{Q\&A agents answer from the script, workflow agents follow the form, code agents bring their own program, and autonomous agents let the expert work.} The single difference underneath is who decides the next step---the platform's fixed loop, a workflow drawn in advance, the tenant's own code, or a ready-made autonomous agent's own judgment. Who decides determines what the platform can do to govern it, and which business it suits.
+
+\Needspace{12.6cm}
+\begin{tcbraster}[
+  raster columns=2,
+  raster equal height=rows,
+  raster column skip=4mm,
+  raster row skip=4mm
+]
+\begin{tcolorbox}[
+  title={T0 · Q\&A agent: answer from the script},
+  colback=PrimaryLight,colframe=Primary,coltitle=white,
+  fonttitle=\bfseries\sffamily,fontupper=\footnotesize,
+  left=2.2mm,right=2.2mm,top=1mm,bottom=1mm
+]
+\textbf{What it is:} the platform runs a fixed ``read, think, consult tools, answer'' loop; the tenant fills in a prompt, picks a model and ticks tools. No code.\\
+\textbf{You provide:} a prompt, a model policy, a tool list.\\
+\textbf{Fits:} work where a wrong answer can be corrected and nothing irreversible happens; many simple agents.\\
+\textbf{Not for:} work that must be deterministic---risk decisions, compliance review, money movement. A prompt cannot guarantee that a step is never skipped or that the same input always yields the same conclusion.
+\end{tcolorbox}
+\begin{tcolorbox}[
+  title={T1 · Workflow agent: follow the form},
+  colback=GreenLight,colframe=Green,coltitle=white,
+  fonttitle=\bfseries\sffamily,fontupper=\footnotesize,
+  left=2.2mm,right=2.2mm,top=1mm,bottom=1mm
+]
+\textbf{What it is:} the business draws steps, branches and human checkpoints as a workflow; the platform's executor runs it step by step, recording and checking each step.\\
+\textbf{You provide:} a statically checkable workflow (from a canvas, or distilled from an autonomous agent's exploration), plus the tools and models each node uses.\\
+\textbf{Fits:} strict ordering, steps that must never be skipped, sign-off by risk or compliance before release.\\
+\textbf{Not for:} exploratory tasks whose steps cannot be fixed in advance; nor general programming---the language is deliberately limited, and complex logic belongs in a code agent.
+\end{tcolorbox}
+\begin{tcolorbox}[
+  title={T2 · Code agent: bring your own program},
+  colback=GoldLight,colframe=Gold,coltitle=white,
+  fonttitle=\bfseries\sffamily,fontupper=\footnotesize,
+  left=2.2mm,right=2.2mm,top=1mm,bottom=1mm
+]
+\textbf{What it is:} an agent program written in any framework and joined through the SDK; the tenant's code owns the loop, and the platform governs the exits and the ledger from outside.\\
+\textbf{You provide:} source code and dependencies; an existing program needs three redirected settings and one new entry point.\\
+\textbf{Fits:} teams with developers, existing business logic or codified procedures, and a need for a custom loop.\\
+\textbf{Not for:} teams without engineering capacity; nor for trusting the code to behave---high-risk side effects still pass the tool gateway, and container self-reports are not trusted.
+\end{tcolorbox}
+\begin{tcolorbox}[
+  title={T3 · Autonomous agent: let the expert work},
+  colback=RustLight,colframe=Rust,coltitle=white,
+  fonttitle=\bfseries\sffamily,fontupper=\footnotesize,
+  left=2.2mm,right=2.2mm,top=1mm,bottom=1mm
+]
+\textbf{What it is:} a ready-made autonomous agent (Claude Code, Codex and their peers) placed in a complete isolated environment, planning and acting on its own; the platform owns only the environment and the exits.\\
+\textbf{You provide:} a task, an environment declaration (software, data, network), the chosen agent.\\
+\textbf{Fits:} a clear goal with an unclear path, trial and error in a real environment, high value per task.\\
+\textbf{Not for:} executing high-risk side effects directly---its output should be distilled into a workflow and signed off before entering production; nor for bulk low-value tasks, where full-machine isolation is not worth its cost.
+\end{tcolorbox}
+\end{tcbraster}
+
+The cards above give the essence of each kind; Table~\ref{tab:types-compare} adds typical uses, who uses it, how it is governed and when it ships. Seen side by side, the selection logic becomes clear: first ask what you can hand to the platform (a prompt, a workflow, code, or a ready-made agent), then how deterministic the business needs the result to be, and finally whether the team can develop software.
+
+\begin{table}[htbp]
+\centering
+\caption{The four kinds compared}
+\label{tab:types-compare}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.5cm}YYYY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Dimension} & \textbf{T0 Q\&A} & \textbf{T1 Workflow} & \textbf{T2 Code} & \textbf{T3 Autonomous}\\
+  \midrule
+  Who decides the next step & The platform's fixed loop & A workflow drawn in advance & The tenant's own code & A ready-made autonomous agent\\
+  What you hand over & Prompt and tool list & A workflow & Source code and dependencies & Task, environment, third-party agent\\
+  Development needed? & No & Business and risk define the workflow; developers supply tools & Yes & No coding, but skill in using agents\\
+  Determinism of results & Low---may differ each time & High---steps are provable & Depends on the code & Low---open-ended\\
+  Typical uses & Service desk, summaries, translation, classification & Verification, review, reporting, approval chains & Research, strategies, existing applications & Due diligence, data analysis, exploratory research\\
+  Not for & Risk decisions, money movement & Exploratory tasks, complex logic & Teams without developers & Direct high-risk actions; bulk low-value tasks\\
+  Who uses it & Business teams, self-service & Business and risk teams; developers supply tools & Business lines with developers; quant and research teams & Research, analysis and engineering teams\\
+  How it is governed & The loop is platform code & Static analysis before release & Exits only, not internals & Full-VM isolation and controlled exits\\
+  Delivery & Phase~1 & Phase~2 & Phase~1 & Phase~3\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+Three mistakes recur when teams choose a kind, and they are worth naming here. First, using a Q\&A agent for work that needs determinism: writing a risk decision or a compliance review as a prompt looks like the fastest way to ship, but a prompt cannot guarantee that a step is never skipped or that the same input never yields a different conclusion; that work belongs in a workflow agent. Second, letting an autonomous agent touch production directly: autonomous agents are for exploring and forming conclusions; the path they find should be distilled into a workflow, signed off, and promoted before it may place orders or change configuration. Third, treating the workflow language as a programming language: it has only six node types precisely so that it can be analyzed statically and signed off; forcing complex logic into it destroys that property, and the logic belongs in a code agent.
+
+One more thing needs saying plainly: T0 to T3 is not a ladder from basic to advanced. The kinds express who owns the control flow and what it costs to govern it. The higher the risk, the more a business should converge on the workflow kind, not reach for more autonomy. A funds-handling process written as a signable workflow is far safer than the same process left to an autonomous model's judgment.
+
+\subsection{Choosing a kind}
+
+Figure~\ref{fig:type-selection} gives a selection path: ask three questions in order.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  question/.style={rounded corners=3pt,draw=Muted,fill=SoftGray,minimum height=11mm,
+                   text width=7.0cm,align=center,inner sep=2mm,line width=.7pt},
+  result/.style={rounded corners=3pt,minimum width=3.4cm,minimum height=11mm,
+                 align=center,line width=.8pt,font=\sffamily\bfseries\footnotesize},
+  flow/.style={-{Stealth[length=2mm]},line width=.8pt,color=Muted},
+  yes/.style={font=\sffamily\scriptsize,fill=white,inner sep=1.5pt,text=GreenDark},
+  no/.style={font=\sffamily\scriptsize,fill=white,inner sep=1.5pt,text=Muted}
+]
+  \node[question] (q0) {Can a prompt plus a tool list express the whole task?};
+  \node[result,draw=Primary,fill=PrimaryLight,text=PrimaryDark,right=14mm of q0] (t0) {T0 Q\&A};
+  \node[question,below=9mm of q0] (q1) {Can the control flow be drawn as a workflow and signed off by risk?};
+  \node[result,draw=Green,fill=GreenLight,text=GreenDark,right=14mm of q1] (t1) {T1 Workflow};
+  \node[question,below=9mm of q1] (q2) {Does the team need to write its own code to control the loop?};
+  \node[result,draw=Gold,fill=GoldLight,text=GoldDark,right=14mm of q2] (t2) {T2 Code};
+  \node[result,draw=Rust,fill=RustLight,text=RustDark,below=9mm of q2] (t3) {T3 Autonomous};
+
+  \draw[flow] (q0) -- node[yes]{yes} (t0);
+  \draw[flow] (q0) -- node[no,right]{no} (q1);
+  \draw[flow] (q1) -- node[yes]{yes} (t1);
+  \draw[flow] (q1) -- node[no,right]{no} (q2);
+  \draw[flow] (q2) -- node[yes]{yes} (t2);
+  \draw[flow] (q2) -- node[no,right]{no --- it needs to explore a full environment} (t3);
+\end{tikzpicture}
+\caption[Selecting a kind]{From business need to agent kind: three questions in order}
+\label{fig:type-selection}
+\end{figure}
+
+A rule of thumb: if it fits on a form, use T0; if it can be drawn as a workflow, use T1; if it needs code, use T2; if it cannot even be drawn, use T3.
+
+\subsection{Two questions that always come up}
+
+\textbf{Is a workflow written in code a T1 or a T2?} A T2. The test is who owns the loop: a graph written in Python or any other language runs inside the tenant's process and is a program, not data, so the platform cannot analyze it before release. Only a workflow run by the platform's executor, described in a declarative file, and analyzable and signable, is a T1.
+
+\textbf{What kind is a multi-agent system?} Multi-agent is a topology between agents, not a new kind. The platform's first-class hosted objects are three: agents, workflows and tool servers (MCP servers). One agent calling another takes the ``register the callee as a tool'' path and inherits every rule of tool governance (Section~\ref{sec:runtime}).
+
+\subsection{Moving between kinds}
+
+The kinds are connected by deliberate migration paths. T3 is for exploration: let a model find a workable path in a real environment. A high-risk, repeatedly executed path should not stay in T3; it should go through ``explore $\rightarrow$ distil a draft workflow $\rightarrow$ compile and check $\rightarrow$ human sign-off'' and become a T1 workflow, so that production always runs the signed diagram. In the other direction, a stable common loop that emerges in T2 can sink into the T0 harness, so that more teams reuse it by configuration alone.
+
+% =============================================================================
+\section{Design Method: Principles, Invariants and Boundaries}
+\label{sec:method}
+
+The whole design reduces to three ideas. First, \term{put uncertain behavior inside a deterministic boundary}: a model's output is unpredictable, but what it can reach, what it can do, and where its actions are recorded are deterministic; governance targets the boundary, not the model. Second, \term{control comes from authoritative state and governed exits, not from how much code you wrote}: whoever holds the record of what really happened and whoever guards the exit that every action must pass has control; everything else can be rented or reused. Third, \term{bind to a protocol, not to a framework}: agent frameworks keep changing; the platform freezes only the protocol between itself and the container, and any framework joins through an adapter.
+
+The eight principles, the control formula, the ten invariants and the four build methods below are all elaborations of these three ideas: the principles say how decisions are made, the formula says where the boundary is cut, the invariants say what must never be violated, and the build methods say where each module comes from.
+
+\subsection{Eight design principles}
+
+Table~\ref{tab:principles} is the starting point from which every decision in the paper is derived. Each concrete design below can be traced back to one or more of them.
+
+\begin{table}[htbp]
+\centering
+\caption{Eight design principles}
+\label{tab:principles}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}C{0.8cm}L{4.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{\#} & \textbf{Principle} & \textbf{Engineering meaning}\\
+  \midrule
+  1 & Bind to protocols, not frameworks & The platform freezes only protocol boundaries (HTTP, event streams, tool integration); a new framework is a new adapter, not a new platform\\
+  2 & Separate control from capability & Event integrity, side-effect control and network boundaries are enforced by the platform and never rely on container code behaving; checkpoints and interruptibility rely on framework cooperation and are declared honestly at the level actually supported\\
+  3 & Declare, then prove & A capability manifest is an application, not evidence; it takes effect only after a conformance test\\
+  4 & Make state ownership explicit & Conversation, execution, environment and long-term memory each have an authoritative source, and recovery semantics are written into the contract\\
+  5 & Generation may be imperfect; gates must be deterministic & Large models may help produce configuration and draft workflows, but deterministic checks---schema validation, policy engines, compilers---have the final word\\
+  6 & Rich outside, minimal inside & The public API offers complete product semantics; the platform–container contract does only three things: be invoked, report liveness, be canceled\\
+  7 & Own state and exits; rent compute & The enterprise keeps authoritative state and the exits where decisions are made, and leaves operating the stateful fleet to a vendor\\
+  8 & Agents are first-class principals & An agent stands beside people and services, with an owner, a boundary, evidence, a history and a lifecycle\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{The control formula}
+
+The architecture's judgment about what to build and what to outsource compresses into one formula:
+
+\[
+  \text{Control} = \text{ownership of authoritative state} + \text{occupancy of the critical exits}
+\]
+\[
+  \text{Operational burden} \approx \text{size of the stateful compute fleet you operate yourself}
+\]
+
+The first line says that whoever holds the authoritative record of what really happened, and whoever guards the exits that every action must pass, has control. The second says that the truly heavy operational burden lies in stateful compute fleets---scheduling, isolation, scaling, failure recovery. Put together, the conclusion is direct: keep authoritative state and the critical exits (they are light) and hand the compute fleet to a vendor (it is the heavy part). This is neither ``build everything'' nor ``buy everything''; it is one cut placed according to where control and operational burden actually lie.
+
+\subsection{Ten system invariants}
+
+Invariants are not features. Features can be many or few and can be sequenced; invariants are constraints that no implementation and no enterprise instance may violate, and they form the acceptance checklist (Appendix~\ref{app:checklist}). Table~\ref{tab:invariants} lists the ten, each with a way to verify it, so that none of them is a slogan.
+
+\begin{table}[htbp]
+\centering
+\caption{Ten system invariants and how each is verified}
+\label{tab:invariants}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}C{0.8cm}L{5.8cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{\#} & \textbf{Invariant} & \textbf{Verification}\\
+  \midrule
+  1 & No long-lived secret ever exists inside a container & Scan images, environment variables, processes and snapshots; credentials are fetched only by the tool gateway, briefly, per call\\
+  2 & Side effects pass only through the governed exits & Negative network tests: direct calls from a container to a model, a tool or the internet must fail\\
+  3 & Tool calls are authoritative only as recorded by the tool gateway & Compare container-reported events with gateway events; audit trusts only the gateway\\
+  4 & The ledger stays inside the enterprise boundary, append-only, hash-chained & Modifying any historical event breaks the chain check\\
+  5 & Every run has a hard ceiling & Exceeding any of steps, calls, model usage, duration or spend terminates the run\\
+  6 & Tokens are separated by interface & A run token used against the management API, or a platform token used against a runtime exit, is rejected\\
+  7 & User identity is verified against the identity provider & A forged ``on behalf of'' string cannot enter the identity chain\\
+  8 & Shutdown does not depend on the cloud vendor & With the vendor's API simulated as unavailable, revoking issuance and gateway refusal still strip the agent of the ability to act\\
+  9 & Event sequence numbers are assigned by the platform, recorded before delivery & After a disconnect, a client resumes continuously from the ledger by sequence number alone\\
+  10 & Administrative and agent actions share one ledger & Release, authorization, suspension and key rotation can be replayed in relation to run events\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Four ways to build}
+
+Every module is built in one of four ways: built in-house, reused from an existing enterprise system, adopted as an open standard, or rented from a cloud vendor. Table~\ref{tab:build} gives the scope of each and the exit requirement it carries.
+
+\begin{table}[htbp]
+\centering
+\caption{Four ways to build}
+\label{tab:build}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.3cm}L{3.9cm}YY@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Method} & \textbf{Scope} & \textbf{Why} & \textbf{Exit requirement}\\
+  \midrule
+  \tagself & Identity, authorization, the ledger, the task engine, the cloud adapter & These constitute control itself, and no complete product exists for them & Metadata and management APIs depend on no vendor\\
+  \tagreuse & Identity provider, model gateway, tool gateway, CI, finance systems & Enterprises usually already have mature versions; rebuilding is costly and fragments existing processes & Incremental integration through the platform's standard interfaces\\
+  \tagopen & PostgreSQL, OpenTelemetry, event and object-storage semantics & Mature ecosystems lower migration and operations barriers & Data exportable, formats versioned\\
+  \tagrent & Runtime, sandbox, dashboards, object storage & Elasticity, usage-based pricing, vendor economies of scale & Holds no decision rights, holds no unique authoritative data, has a standard exit\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+One rule decides which cloud services may be rented: \textbf{rent the muscle, never the brain or the keys}. A component is rentable only when it satisfies three conditions at once: it holds no decision rights over what may or may not happen; it does not host the enterprise's only authoritative data (the ledger, credentials, identities); and it follows an industry standard, so that the cost of leaving is close to zero. Measured against that rule, a vendor's full product line yields exactly four rentable items: runtime, sandbox, object storage and the observability dashboard. The dashboard passes because it only observes, never touches the ledger, and receives data through the OpenTelemetry open standard, so that switching means changing a destination address. A vendor's identity service, gateways, credential hosting, knowledge base and memory service all fail the test, because each either holds decision rights or hosts authoritative data.
+
+% =============================================================================
+\section{Related Work and Where This Paper Stands}
+\label{sec:related}
+
+By September 2026 the enterprise agent-infrastructure market has converged on several clear patterns. This paper builds on that consensus rather than starting from scratch.
+
+From vendors' public documentation: AWS's AgentCore splits runtime, identity, gateway, memory and observability into composable services; Anthropic's Managed Agents provide stateful sessions and a durable event history; OpenAI's Agents SDK covers sessions, sandboxes, tools, credential vaults, guardrails and tracing; Google's Agent Platform offers a managed runtime, sessions, a memory bank, code execution, access control and observability; Microsoft's Entra Agent ID models the agent as an independent identity principal with a sponsor and lifecycle management \cite{aws-agentcore,anthropic-managed,openai-agents,google-agent-platform,entra-agent-id}.
+
+In execution reliability and isolation, LangSmith Deployment and Temporal provide durable execution, event history, interrupt and resume, and long-running orchestration; Tencent Cloud's open-source CubeSandbox represents the infrastructure route of hosting agent sandboxes on micro-VMs with snapshots and controlled networking \cite{langsmith-deployment,temporal-durable,cube-sandbox}.
+
+In April 2026, within the same week, Anthropic and OpenAI each released structurally identical architectures: a layer responsible for control flow and model calls, explicitly separated from a layer responsible for isolated execution, with credentials never entering the execution sandbox. ``Separate the control plane from the execution plane, keep credentials out of the sandbox, treat gateway events as authoritative'' is therefore an industry consensus rather than one vendor's choice.
+
+\begin{table}[htbp]
+\centering
+\caption{Capabilities the industry already provides, and what this paper does not claim}
+\label{tab:related}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.4cm}L{5.2cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Existing capability} & \textbf{Representative prior work} & \textbf{Not claimed as new here}\\
+  \midrule
+  Managed runtime and elastic scaling & AgentCore Runtime, Managed Agents, Google Agent Runtime & Deploying agents to a managed compute environment\\
+  Identity, credentials and tool governance & AgentCore Identity and Gateway, Entra Agent ID, OpenAI Vaults & Independent agent identity, credentials kept out of business code, tool calls constrained by policy\\
+  Sessions, memory and observability & Google Sessions and Memory Bank, OpenAI tracing, LangSmith & Persisting session state, tracing call chains, analyzing run quality\\
+  Durable execution and isolated sandboxes & Temporal, LangGraph and LangSmith, CubeSandbox, cloud code execution & Recovering after failure, waiting for human input, isolated code execution\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+This paper's position is to close the \term{enterprise control boundary} between those capabilities. Each of the prior systems solves one segment of the problem; assembling them into a platform the enterprise fully controls, can migrate as a whole, and can answer to auditors for still requires a set of enterprise-side contracts and mechanisms. The paper's additions are: an agent capability described along four orthogonal axes and certified by test; a minimal container contract with platform-assigned event sequencing; a permission-intersection rule covering scheduled principals, user delegation and structural denials; a three-stage shutdown path independent of the vendor's management API; effectively-once semantics built from checkpoints, a tool idempotency ledger and archived results; and a hash-chained enterprise ledger that supports compliant deletion and reconciles against vendor bills.

@@ -1,0 +1,245 @@
+% =============================================================================
+\whitepaperpart{IV}{Productization, Delivery and Evolution}
+{Turning the architecture into a reusable product: integrating with enterprise systems, separating kernel from policy packs, what Phase~1 delivers, how it is accepted, and what comes next.}
+
+% =============================================================================
+\section{Enterprise Integration and Generalization}
+\label{sec:integration}
+
+\subsection{Reusing what the enterprise already has}
+
+The platform is not an island. An enterprise usually already has an identity provider, a model gateway, a tool gateway, a continuous-integration pipeline, finance systems and an event bus; all of them are integrated rather than rebuilt (Table~\ref{tab:integration}). For enterprises that do not yet have a model or tool gateway, the platform ships default implementations (an open-source LLM gateway and a built-in tool gateway). Figure~\ref{fig:zoom-ent} is the enterprise-systems layer of the complete architecture, with each system annotated with the platform module it connects to.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[node distance=2.2mm,zoom/.append style={minimum height=19mm}]
+\node[reuse,zoom] (e1) {\zc{Identity provider}{Login, delegation checks, service identity → agent IAM, console}};
+\node[reuse,zoom,right=of e1] (e2) {\zc{Model gateway}{Existing; add blocklist, data classification → shared services}};
+\node[reuse,zoom,right=of e2] (e3) {\zc{Tool gateway}{Existing; add routing, idempotency, risk tiers → shared services}};
+\node[reuse,zoom,right=of e3] (e4) {\zc{CI and scanning}{Reused for code-agent image builds → registry and release}};
+\node[reuse,zoom,below=of e1] (e5) {\zc{Finance and chargeback}{Receives the allocation book → metering}};
+\node[reuse,zoom,right=of e5] (e6) {\zc{Risk approval desk}{Tickets in, decisions out → interrupt and resume}};
+\node[reuse,zoom,right=of e6] (e7) {\zc{Enterprise event bus}{Business events create runs → event triggers}};
+\node[reuse,zoom,right=of e7] (e8) {\zc{Enterprise object storage}{May replace rented storage → files and artifacts}};
+\begin{scope}[on background layer]\node[band,draw=Green!60!white,fit=(e1)(e8)] {};\end{scope}
+\end{tikzpicture}
+\caption[Enterprise systems and their integration points]{Enterprise systems and the platform modules they connect to (the enterprise-systems region of the complete architecture)}
+\label{fig:zoom-ent}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{How enterprise systems are integrated}
+\label{tab:integration}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.0cm}L{3.6cm}Y C{1.3cm}@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Enterprise system} & \textbf{Platform module} & \textbf{How} & \textbf{Phase}\\
+  \midrule
+  Identity provider & Agent IAM, console, CLI & Login for people and CI, delegation verification, service identity & 1\\
+  Model gateway & Shared services & Add the agent blocklist and data-classification mapping & 1\\
+  Tool gateway & Shared services & Add four-class routing, the idempotency ledger and the risk dictionary & 1\\
+  CI and dependency scanning & Registry and release & Reused when building code-agent images & 1\\
+  Finance and chargeback & Metering and reconciliation & Export the allocation book; automated posting later & 1 / 2\\
+  Risk approval desk & Interrupt and resume & Push tickets; decisions resume the run & 2\\
+  Enterprise event bus & Event triggers & Business events create runs & 2\\
+  Enterprise object storage & Files and artifacts & May replace rented object storage & optional\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Kernel, adapter packs and policy packs}
+
+For one architecture to be reused across enterprises and industries, what stays fixed and what is replaced per enterprise must be stated up front. The platform is divided into three layers (Table~\ref{tab:kernel}).
+
+\begin{table}[htbp]
+\centering
+\caption{Kernel, adapter packs and policy packs}
+\label{tab:kernel}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{2.6cm}L{6.6cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Layer} & \textbf{Content} & \textbf{Rate of change}\\
+  \midrule
+  Kernel & The three interface layers, the five action channels, the four-axis manifest, the task engine and circuit breaker, the unified ledger and hash chain, the identity core, the five-primitive adapter, the three books, the three-stage kill switch & Fixed across enterprises, strictly versioned\\
+  Adapter packs & Identity-provider binding, model and tool gateway integration, cloud adapters, the observability backend & Replaced per enterprise and per vendor\\
+  Policy packs & The risk dictionary, approval rules, data classification, structural denials, retention and deletion policy & Vary by industry, region and risk appetite\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+The kernel contains no industry business logic; that is the key to generalization. A new enterprise goes live in four steps: bind the identity provider and choose a cloud adapter; integrate existing gateways or use the defaults; fill in the kind presets and the risk dictionary; run the ten-invariant acceptance and the conformance tests. The kernel code does not change.
+
+\subsection{An illustrative policy pack}
+
+The following example shows how industry constraints enter a policy pack without contaminating the kernel; it corresponds to no real organization. A healthcare provider allows agents to coordinate appointments, pre-screen documents and check insurance details. Its policy pack states that protected health information may enter only designated model domains; that sending a medical summary externally requires human confirmation; that altering a diagnosis, signing a prescription, widening one's own permissions and cross-tenant access are structural denials; and that high-risk workflows may be carried only by workflow agents or specially reviewed code agents, with per-step checkpoints, cold interrupts and a complete audit chain.
+
+\begin{notebox}
+  \textbf{Scope of the example:} this is a fictional policy pack and constitutes no medical, privacy or compliance advice. A real implementation must have its data classification, approval conditions and denials defined by the legal, security and business owners of the jurisdiction concerned.
+\end{notebox}
+
+% =============================================================================
+\section{Phase~1 Delivery, Roadmap and Acceptance}
+\label{sec:mvp}
+
+\subsection{Three things that must be right on day one}
+
+Three things, if wrong, can only be fixed later by rewriting every agent in production, so they must be right from day one:
+
+\begin{enumerate}
+  \item \textbf{Freeze the contract.} Define the format of the six events, including the interrupt event and the resume field, once and completely.
+  \item \textbf{Own authoritative state.} Events, checkpoints, the registry and the session map land in the enterprise's own database from the first day.
+  \item \textbf{Both gateways in the path.} From the first day there is no route around the gateways for model or tool calls.
+\end{enumerate}
+
+\subsection{Scope by phase}
+
+The order of evolution is ``freeze the contracts that cannot be reworked, then widen governance, then open up more autonomy'' (Figure~\ref{fig:roadmap}, Table~\ref{tab:phases}). The boundaries between phases are not counts of features; they are thresholds at which the risk boundary is opened one step further.
+
+\begin{figure}[htbp]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  font=\sffamily\footnotesize,
+  stage/.style={rounded corners=4pt,minimum width=4.6cm,minimum height=2.7cm,
+                text width=4.2cm,align=left,line width=.85pt,inner sep=3mm,anchor=north west},
+  flow/.style={-{Stealth[length=2.2mm]},line width=1pt,color=Muted},
+  flabel/.style={font=\sffamily\scriptsize,text=Muted,text width=2.1cm,align=center,inner sep=1pt}
+]
+  \node[stage,draw=Primary,fill=PrimaryLight] (mvp) at (0,0)
+    {\textbf{\color{PrimaryDark}Phase 1 · Governance loop}\\[2pt]Q\&A and code agents · one cloud · both gateways · circuit breaker · idempotency · delegation · ledger};
+  \node[stage,draw=Green,fill=GreenLight] (p2) at ([xshift=26mm]mvp.north east)
+    {\textbf{\color{GreenDark}Phase 2 · Determinism and resilience}\\[2pt]workflow agents · interrupt and resume · approval · memory · event triggers · multi-cloud};
+  \node[stage,draw=Rust,fill=RustLight] (p3) at ([xshift=26mm]p2.north east)
+    {\textbf{\color{RustDark}Phase 3 · Governed autonomy}\\[2pt]autonomous agents · explore-to-compile · canvas · sandbox API · agent interoperation};
+  \draw[flow] (mvp.east) -- (p2.west);
+  \draw[flow] (p2.east) -- (p3.west);
+  \node[flabel,above=1mm of $(mvp.east)!0.5!(p2.west)$] {once the loop is stable};
+  \node[flabel,above=1mm of $(p2.east)!0.5!(p3.west)$] {once policy and isolation mature};
+\end{tikzpicture}%
+}
+\caption[Roadmap]{From a governance loop to governed autonomy}
+\label{fig:roadmap}
+\end{figure}
+
+\begin{table}[htbp]
+\centering
+\caption{Scope of the three phases}
+\label{tab:phases}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{1.6cm}L{6.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{Phase} & \textbf{Core capabilities} & \textbf{Product boundary}\\
+  \midrule
+  Phase~1 & Q\&A and code agents, one cloud, scheduled triggers, basic console, circuit breaker, both kinds of idempotency, two token classes, delegation verification, three-stage kill switch, hash chain, log intake, fragment stream table & A complete loop from development to accountability\\
+  Phase~2 & Workflow agents, interrupt mechanics, approval console, quota management, long-term memory, event triggers, multi-cloud scheduling, own observability dashboards, advanced console & Deterministic workflows and operational resilience\\
+  Phase~3 & Autonomous agents, the explore-to-compile pipeline, a workflow canvas, a sandbox API product, agent interoperation & More autonomy inside the same governance boundary\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Six acceptance loops}
+
+What counts as ``built'' in Phase~1? Not ``all components deployed'' but six end-to-end paths that run from the entrance to the final evidence (Table~\ref{tab:loops}). The component list is for building; the loops are for acceptance.
+
+\begin{table}[htbp]
+\centering
+\caption{The six acceptance loops of Phase~1}
+\label{tab:loops}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}C{0.8cm}L{2.9cm}Y@{}}
+  \toprule
+  \rowcolor{GreenLight}
+  \textbf{\#} & \textbf{Loop} & \textbf{End-to-end acceptance}\\
+  \midrule
+  1 & Develop and release & Few changes, cloud build, release; goes live after the conformance check and can be rolled back\\
+  2 & Conversation & A question or a scheduled trigger, streamed output, resumption by sequence number after a disconnect\\
+  3 & Tool execution & Gateway authorization, short-lived credential injection, four-class routing, a sandbox opened on demand for environment tools\\
+  4 & Audit and accountability & Full replay from the ledger, attribution through the identity chain, administrative actions linked, hash chain verified\\
+  5 & Cost reconciliation & Allocation per agent and per run is explainable and reconciles against the vendor's busy/idle bill\\
+  6 & Safety & A runaway loop is broken by the circuit breaker; an unauthorized call is refused; a duplicate creation returns the same run; a forged delegation is rejected; the first two kill-switch stages still work with the vendor unreachable\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+% =============================================================================
+\section{Key Architecture Decisions and Trade-offs}
+\label{sec:adr}
+
+Table~\ref{tab:adr} summarizes the twelve most important decisions in this paper, each with what it gains and what it costs, so that reviewers can challenge them one by one.
+
+\begin{table}[htbp]
+\centering
+\caption{Key architecture decisions}
+\label{tab:adr}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{0.9cm}L{4.2cm}L{4.4cm}Y@{}}
+  \toprule
+  \rowcolor{PrimaryLight}
+  \textbf{ID} & \textbf{Decision} & \textbf{Gains} & \textbf{Costs and constraints}\\
+  \midrule
+  A1 & Adapt frameworks through a protocol & Frameworks replaceable, contract stable & Adapters and a conformance suite must be maintained\\
+  A2 & Complete outside, minimal inside & Product experience decoupled from runtime stability & The control plane carries more semantics\\
+  A3 & Four axes instead of hard-coded kinds & New scenarios by combination; orthogonal policy & Stricter manifest and admission checks\\
+  A4 & Record first, then distribute & Resumable reads, ordered events, replay & The ledger becomes a critical write path\\
+  A5 & Gateway events are the authoritative facts & No reliance on untrusted container self-reports & Gateways must be highly available and low-latency\\
+  A6 & Circuit breaker in Phase~1 & A loss ceiling from the first launch & Counters and termination logic to build\\
+  A7 & Two token classes & Management and runtime structurally separated & More complex token exchange and validation\\
+  A8 & Three-stage kill switch & Shutdown independent of the cloud vendor & Registry and both gateways must act together\\
+  A9 & One database first, semantics first & Fast delivery with consistent semantics & Fragment write amplification must be managed early\\
+  A10 & One cloud in practice, multi-cloud by contract & Small operational surface at the start & Portability must be proven by repeated rehearsal\\
+  A11 & Autonomous agents deferred to Phase~3 & Mainstream, governable workloads first & The most autonomous scenarios are not yet covered\\
+  A12 & Policy packs isolate industry logic & The kernel is reusable across industries & Each industry maintains its own policy assets\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+One order runs through all of these decisions: build identity and the ledger before memory and smart scheduling; prove least privilege and the exit path before opening more tools and more autonomy.
+
+% =============================================================================
+\section{Residual Risks and Companion Specifications}
+\label{sec:risks}
+
+\subsection{Risks accepted and continuously reduced}
+
+Some risks are reduced by the design but not eliminated. Table~\ref{tab:residual} lists them plainly; reviewers and readers should hear them stated rather than discover them.
+
+\begin{table}[htbp]
+\centering
+\caption{Residual risks}
+\label{tab:residual}
+\rowcolors{2}{SoftGray}{white}
+\begin{tabularx}{\textwidth}{@{}>{\bfseries}L{3.4cm}L{5.6cm}Y@{}}
+  \toprule
+  \rowcolor{RustLight}
+  \textbf{Risk} & \textbf{Reduction} & \textbf{Why it remains}\\
+  \midrule
+  Cross-tool confused deputy & Risk tiers, dual sign-off on sensitive-read plus outbound-send, parameter policies & A legitimate combination of permissions can still be exploited by injected instructions\\
+  Implicit instructions in files & Content isolation, scanning, least privilege for tools & Unstructured files can carry malicious instructions\\
+  Data leakage through external models & Data classification mapped to model allow-lists, log redaction & Phase~1 lacks fine-grained data-loss prevention\\
+  Vendor reconciliation granularity & Tag verification, the three internal books & Granularity is ultimately limited by the vendor's billing\\
+  Vendor visibility of runtime plaintext & Egress convergence, minimal data, contractual and regional constraints & Hosted compute inherently processes plaintext\\
+  \bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Companion specifications}
+
+This paper describes the architecture. Field-level definitions are carried by three companion specifications, maintained separately with their own version numbers: the field-level specification of the container contract (sequence numbers, event de-duplication identifiers, liveness semantics, format versions, error classes), published as OpenAPI and JSON Schema; the detailed design of the tool authorization model and identity; and the conformance test suite, with at least three cases---process kill, session reclaim and rebuild, and egress blocking. Of the three, the container-contract specification has the highest priority because it cannot be reworked; until it is frozen, onboarding several agent frameworks in parallel should not begin.
+
+% =============================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+The engineering scope of an enterprise agent platform is far larger than ``put the agent in a container''. The model decides how an agent reasons; the runtime decides where it runs; the control plane decides under whose identity, within what boundary, and at whose cost and accountability it acts.
+
+The architecture proposed here replaces framework binding with a protocol, replaces hard-coded kinds with a four-axis capability manifest, separates resources, conversations and executions through sessions, threads and runs, closes side effects behind five action channels, composes identity security from two token classes, verified delegation, a credential vault and a three-stage kill switch, connects events, audit, metering and recovery through a unified ledger, and keeps the freedom to choose vendors through a five-primitive cloud adapter.
+
+What matters in this design is not the number of components but whether the boundary can be proven: that no long-lived secret ever entered a container, that no side effect bypassed the exits, that events were recorded before delivery, that permissions could only narrow, that cost had a hard ceiling, and that the agent could still be cut off with the vendor unreachable. Only when those ten invariants hold does the platform truly possess control.
+
+For an enterprise this means three concrete things. Business teams can put agents to work faster, because onboarding, compute and permissions no longer have to be solved by each team. Security and audit can approve production use with confidence, because every action has an exit, a record and a ceiling. And management does not have to trade control for speed, because everything beneath the contract can be replaced.
+
+An enterprise may rent all the compute and environments its agents need. Identity, keys, decision rights, facts and the ability to leave should remain its own.

@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you reference this white paper, please cite it as below."
+title: "Enterprise Agent Hosting Platform: A Reference Architecture"
+abstract: >-
+  A reference architecture for hosting AI agents inside an enterprise. The
+  enterprise owns the control plane (identity, authorization, the ledger, task
+  state and interface contracts), rents runtimes, sandboxes and storage by
+  usage, and binds to a minimal protocol rather than to any agent framework.
+  Published in English and Simplified Chinese.
+authors:
+  - given-names: Yuting
+version: "1.0"
+date-released: "2026-09-24"
+license: CC-BY-4.0
+repository-code: "https://github.com/YOUR_GITHUB_USERNAME/enterprise-agent-hosting-platform"
+url: "https://github.com/YOUR_GITHUB_USERNAME/enterprise-agent-hosting-platform"
+keywords:
+  - AI agents
+  - agent platform
+  - agent runtime
+  - reference architecture
+  - control plane
+  - workload identity
+  - tool governance
+  - audit ledger
+  - sandbox
+  - multi-cloud
+preferred-citation:
+  type: report
+  title: "Enterprise Agent Hosting Platform: A Reference Architecture"
+  authors:
+    - given-names: Yuting
+  year: 2026
+  month: 9
+  notes: "Technical white paper, version 1.0. English and Simplified Chinese editions."
+  url: "https://github.com/YOUR_GITHUB_USERNAME/enterprise-agent-hosting-platform"

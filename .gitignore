@@ -1,0 +1,17 @@
+# LaTeX build output
+build/
+*.aux
+*.log
+*.toc
+*.lof
+*.lot
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.xdv
+
+# Editors and operating systems
+.DS_Store
+.vscode/
+*.swp
